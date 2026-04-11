@@ -1,0 +1,13 @@
+{
+  "college_name": "Demo College — Hackathon 2025",
+  "fee_deadlines": ["2025-07-31", "2025-12-15", "2026-03-20"],
+  "admission_season": { "start": "2025-07-01", "end": "2025-08-15" },
+  "exam_result_days": ["2025-05-20", "2025-11-18"],
+  "class_breaks": {
+    "morning_break": "10:30",
+    "lunch_break": "13:00",
+    "evening_break": "16:00"
+  },
+  "high_traffic_services": ["fee_payment", "tc_mc_request", "migration_cert"],
+  "fast_track_services": ["bonafide_cert", "address_update", "id_card"]
+}

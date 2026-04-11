@@ -1,0 +1,26 @@
+{
+  "intent_classifier": {
+    "category": "fee_payment",
+    "urgency": "critical",
+    "counter_type": "cashier",
+    "est_service_minutes": 8,
+    "details": "Fee payment — deadline today at 5pm"
+  },
+  "wait_predictor": {
+    "wait_minutes": 12,
+    "lower_bound": 11,
+    "upper_bound": 14,
+    "confidence": 87,
+    "reason": "Fee deadline today — above average volume"
+  },
+  "sentiment_flash_high": {
+    "frustration_level": 4,
+    "admin_alert": true,
+    "flash_message": "Hi Rahul, we know the wait feels long. You're #3 in queue — about 6 minutes away. Thank you for your patience."
+  },
+  "sentiment_flash_normal": {
+    "frustration_level": 1,
+    "admin_alert": false,
+    "flash_message": "Hi! You're #3 in queue. Estimated wait is about 6 minutes. We appreciate your patience!"
+  }
+}

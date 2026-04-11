@@ -1,0 +1,12 @@
+{
+  "generated_at": "2025-07-31T00:05:00Z",
+  "expected_peak": "2:00pm – 4:00pm (fee deadline today at 5pm)",
+  "staff_recommendation": "Open Counter 2 by 1:30pm. Assign 1 dedicated cashier.",
+  "top_intents": [
+    "Fee payment (43%)",
+    "Bonafide certificate (28%)",
+    "TC / MC request (18%)"
+  ],
+  "efficiency_score": 84,
+  "actionable_tip": "Send WhatsApp reminder at 12pm to all pending-fee students with queue link."
+}

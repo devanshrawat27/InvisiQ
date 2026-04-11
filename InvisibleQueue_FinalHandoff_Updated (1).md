@@ -1,0 +1,1715 @@
+**INVISIBLE QUEUE SYSTEM**
+
+Developer Handoff Document
+
+*Prepared for Antigravity Development Team --- Final Updated Version*
+
+  --------------------- -------------------------------------------------
+  **Client**            Anuj --- College Hackathon 2025
+
+  **Document Type**     Developer Handoff --- Implementation Ready
+
+  **System Type**       AI-First Virtual Queue Engine
+
+  **Target**            Indian College Offices (Fee Cell, Admission,
+                        Canteen, Admin)
+
+  **AI Engine**         Claude API --- claude-sonnet-4-20250514
+
+  **Core Stack**        React + Vite · Node.js + Express · Firebase ·
+                        Socket.io
+
+  **Status**            Architecture Finalised --- Ready for Development
+
+  **Version**           FINAL --- Includes Admin Flow Update + Chatbot
+                        Removal
+  --------------------- -------------------------------------------------
+
+  -----------------------------------------------------------------------
+  ⚠ READ BEFORE STARTING This document is implementation-ready. Build the
+  working queue end-to-end first (Parts 2--5), then layer AI on top. The
+  ANTHROPIC_API_KEY must ONLY be used server-side. Never in frontend
+  code. All demo scenarios described in Part 9 must work before
+  submission. KEY CHANGES IN THIS VERSION: • Chatbot removed --- replaced
+  with flash-type alert messages throughout • Admin queue flow updated
+  --- AI drives the queue automatically; admin only monitors and marks
+  Attended / Removed
+
+  -----------------------------------------------------------------------
+
+**PART 1 --- Project Overview**
+
+Invisible Queue System is an AI-first virtual queue management platform
+built for Indian college offices. Students scan a QR code, join a
+digital queue, and wait freely --- no physical standing required. Claude
+AI runs 5 parallel background monitors every 60 seconds, making
+real-time decisions on queue ordering, no-show detection, fraud
+prevention, surge alerts, and personalised flash notifications.
+
+The system learns from every service interaction, improving its
+wait-time predictions daily. Admins receive an AI-generated morning
+briefing each day. There is no chat interface --- the system
+communicates with students through smart flash-type alert messages
+displayed on the waiting screen. This is not a token dispenser --- it is
+an AI decision engine that eliminates the inefficiency of static queues
+in college offices.
+
+**Core Goal**
+
+  ------------------ ----------------------------------------------------
+  **Dimension**      **Description**
+
+  Problem            1,400+ students daily lose hours in college queues.
+                     No intelligence, no fairness, no prediction.
+
+  Solution           An AI engine that decides who goes next, predicts
+                     wait time, detects ghosts, routes users, and learns
+                     daily.
+
+  Communication      No chatbot. Flash-type alert messages on the student
+                     screen deliver real-time status, nudges, and
+                     empathetic updates automatically.
+
+  Admin Role         Admin monitors only. AI drives all queue movement.
+                     Admin confirms physical presence via Attended /
+                     Removed buttons.
+
+  Differentiator     AI is not a feature here. AI IS the system. Every
+                     queue decision --- and every student notification
+                     --- goes through the AI layer.
+
+  Outcome            Faster queues, fairer service, real-time visibility
+                     for admins, zero smartphones needed (SMS fallback).
+  ------------------ ----------------------------------------------------
+
+**PART 2 --- Complete User Flow (Updated)**
+
+  -----------------------------------------------------------------------
+  ℹ UPDATED FLOW: The chatbot has been removed. All student communication
+  is via flash alert messages on their waiting screen. The admin no
+  longer clicks 'Next' --- AI automatically calls the next user. Admin
+  only marks Attended or Removed when the student physically arrives.
+
+  -----------------------------------------------------------------------
+
+**Step 1 --- Student Scans QR Code**
+
+  ------------------ ----------------------------------------------------
+  **Field**          **Detail**
+
+  User Action        Student scans printed QR code
+
+  Backend            Browser opens React PWA (no app install). URL
+                     contains queue_id. PWA fetches GET
+                     /queue/:id/status.
+
+  AI Trigger         None
+
+  Output             Displays queue name, live count, current
+                     AI-estimated wait time, and Join button.
+  ------------------ ----------------------------------------------------
+
+**Step 2 --- Student Fills Join Form**
+
+  ------------------ ----------------------------------------------------
+  **Field**          **Detail**
+
+  User Action        Student fills join form
+
+  Fields             Name, phone number, visit reason (free text),
+                     optional: declares Emergency / Elderly / Pregnant
+                     priority.
+
+  AI Trigger         None
+
+  Output             Form validated client-side before submission.
+  ------------------ ----------------------------------------------------
+
+**Step 3 --- Student Clicks Join**
+
+  ------------------ ----------------------------------------------------
+  **Field**          **Detail**
+
+  User Action        Student clicks Join
+
+  Backend            POST /queue/:id/join fires. Backend: (1) validates
+                     phone (Firebase fraud check), (2) saves user to
+                     Firebase RT DB, (3) triggers 2 Claude API calls in
+                     parallel.
+
+  AI Trigger         Intent Classifier + Wait Predictor run
+                     simultaneously via Promise.all()
+
+  Output             Student assigned position #N. Screen shows:
+                     position, '11--14 min (87% confidence)', intent
+                     badge. A flash alert appears: "You're #7 in queue
+                     --- estimated wait 13 min. Head to Counter 1 when
+                     called." Socket.io emits queue_update to all
+                     clients.
+  ------------------ ----------------------------------------------------
+
+**Step 4 --- Student Waits (Waiting Screen)**
+
+  ------------------ ----------------------------------------------------
+  **Field**          **Detail**
+
+  User Action        Student watches waiting screen
+
+  Backend            Every 60 seconds, background monitor runs: Ghost
+                     Buster scores inactivity, Urgency Engine re-sorts
+                     queue, Congestion Oracle checks join rate, Fraud
+                     Scanner rechecks, Counter Compass balances counters.
+
+  AI Trigger         All 5 monitors use algorithmic scoring (NOT Claude
+                     API calls --- no cost).
+
+  Flash Alerts       System auto-sends contextual flash messages on the
+                     waiting screen based on AI scores. Examples: 'Surge
+                     alert: Queue is filling fast --- your wait may
+                     increase slightly.' / 'You're now #3 --- please make
+                     your way to the office.' / 'We noticed you may have
+                     stepped away. Reply to confirm your spot.'
+
+  No Chatbot         There is NO chat widget. All messages are
+                     system-generated, shown as non-dismissible flash
+                     banners on the student waiting screen.
+  ------------------ ----------------------------------------------------
+
+**Step 5 --- Sentiment-Triggered Flash Alert**
+
+  ------------------ ----------------------------------------------------
+  **Field**          **Detail**
+
+  Trigger            Ghost Buster bail_probability \> 60 OR urgency_score
+                     rising OR wait_exceeded_ratio \> 1.3
+
+  Backend            Backend sends current wait context to Claude
+                     Sentiment Scorer. Returns frustration_level (1--5) +
+                     personalised flash message.
+
+  AI Trigger         Claude API: Sentiment Scorer. Returns
+                     frustration_level (1--5) + auto_message string.
+
+  Output             Flash alert auto-appears on student screen. Example:
+                     'Hi Rahul, we know the wait feels long. You're #3
+                     --- about 6 minutes away. Thank you for your
+                     patience.' If frustration level ≥ 4: admin dashboard
+                     shows urgent badge on that user.
+
+  No Chatbot         Student does NOT type anything. The flash message is
+                     entirely system-initiated based on AI scoring.
+  ------------------ ----------------------------------------------------
+
+**Step 6 --- Student Is 3 Spots Away**
+
+  ------------------ ----------------------------------------------------
+  **Field**          **Detail**
+
+  User Action        Student's position reaches #3
+
+  Backend            Counter Compass assigns optimal counter. Backend
+                     emits turn_approaching event to that user's
+                     Socket.io session.
+
+  AI Trigger         None (algorithmic)
+
+  Flash Alert        Flash message on student screen: 'You're 3 spots
+                     away --- please head to Counter 1 now.' Web Push
+                     notification also sent if permissions granted.
+  ------------------ ----------------------------------------------------
+
+**Step 7 --- AI Automatically Calls Next User (UPDATED)**
+
+  -----------------------------------------------------------------------
+  ⚠ CRITICAL CHANGE: Admin no longer clicks 'Call Next'. The AI handles
+  queue movement automatically every 60 seconds. Admin only confirms
+  physical presence.
+
+  -----------------------------------------------------------------------
+
+  ------------------ ----------------------------------------------------
+  **Field**          **Detail**
+
+  Trigger            AI auto-advance fires every 60 seconds OR when
+                     current user is marked Attended / Removed by admin.
+
+  Backend            System auto-calls the top user from the sorted
+                     queue. Socket.io emits queue_update to ALL connected
+                     devices. Twilio SMS sent to called user.
+                     Pre-classified intent shown on admin screen.
+
+  AI Trigger         None at this step (intent already classified at Step
+                     3). Auto-advance is algorithmic.
+
+  Flash Alert on     'YOUR TURN --- Please go to Counter 1 now. Token:
+  Student Screen     Q-0042.'
+
+  Admin Action       Admin sees the called user's name, token, and intent
+                     on screen. Admin does ONE of two things only: (1)
+                     Click ATTENDED if student is physically present, or
+                     (2) Click REMOVED if student is not present.
+
+  Attended           Service timer starts. User status set to 'called'.
+                     Logged in service_history.
+
+  Removed            User removed from queue. Queue shifts. Ghost Buster
+                     re-scans remaining users. SMS sent: 'You were
+                     removed from the queue. Please rejoin if needed.'
+  ------------------ ----------------------------------------------------
+
+**Step 8 --- Service Completed**
+
+  ------------------ ----------------------------------------------------
+  **Field**          **Detail**
+
+  User Action        Service completed
+
+  Backend            Admin clicks Done (or AI auto-times out after 3× avg
+                     service time). Backend logs: { predicted_wait,
+                     actual_wait, service_type, time_of_day, counter_id
+                     }. Rolling weighted average updated (30% today, 70%
+                     history).
+
+  AI Trigger         None (data logging only)
+
+  Output             Queue shifts. AI auto-calls next user. Ghost Buster
+                     re-scans remaining users. Accuracy delta stored in
+                     Firestore.
+  ------------------ ----------------------------------------------------
+
+**Step 9 --- Midnight Nightly Learning**
+
+  ------------------ ----------------------------------------------------
+  **Field**          **Detail**
+
+  Trigger            Cron job fires at 00:05 daily
+
+  Backend            Reads all service_history docs for today. Computes
+                     accuracy. Updates model_weights. Sends full daily
+                     summary to Claude for briefing generation.
+
+  AI Trigger         Claude API: Daily Briefing Generator. Returns
+                     5-point JSON briefing.
+
+  Output             Admin sees AI briefing card at 7am. Accuracy graph
+                     updates. Next day's predictions use improved
+                     weights.
+  ------------------ ----------------------------------------------------
+
+**PART 3 --- Feature Breakdown --- Module-Wise**
+
+**Module 1 --- QR Queue Join**
+
+  ------------------ ----------------------------------------------------
+  **Feature**        **Student joins queue by scanning a printed QR code.
+                     No app download.**
+
+  Input              Name (string), phone (string, 10-digit),
+                     visit_reason (string, free text), priority (enum:
+                     normal \| elderly \| emergency)
+
+  Output             { position: number, queue_id: string, wait_minutes:
+                     number, confidence: number, intent_category: string,
+                     token_number: string }
+
+  Backend Logic      1\. Validate phone --- check Firebase for duplicate
+                     in active queue. 2. Generate token number. 3. Save
+                     user to Firebase RT DB. 4. Call Claude Intent
+                     Classifier + Wait Predictor in parallel. 5. Emit
+                     queue_update via Socket.io.
+
+  Flash Alert        After joining: system shows flash message on student
+                     screen with position, wait estimate, and counter
+                     assignment.
+
+  AI Usage           Intent Classifier (categorises visit reason). Wait
+                     Predictor (returns wait_minutes + confidence). Both
+                     called via Promise.all() --- max latency \~1.4s.
+  ------------------ ----------------------------------------------------
+
+**Module 2 --- Real-Time Queue Display**
+
+  ------------------ ----------------------------------------------------
+  **Feature**        **All connected devices see live queue updates
+                     without page refresh.**
+
+  Input              Socket.io room: queue\_\<queue_id\>. Events:
+                     queue_update, surge_alert, ghost_flag, turn_called,
+                     fraud_alert, flash_message.
+
+  Output             Animated position counter drop on every student
+                     device. Admin dashboard refreshes list. Flash alert
+                     banners appear on student screens as needed.
+
+  Backend Logic      Socket.io server maintains one room per queue_id.
+                     io.to(\'queue_abc\').emit(\'queue_update\', {
+                     users\[\], avg_wait, congestion }). AI monitors feed
+                     flash_message events into the same emit pipeline.
+
+  AI Usage           None for the WebSocket layer. AI runs separately and
+                     pushes flash_message payloads into the emit
+                     pipeline.
+  ------------------ ----------------------------------------------------
+
+**Module 3 --- Ghost Buster (No-Show Detection)**
+
+  ------------------ ----------------------------------------------------
+  **Feature**        **Detects users likely to abandon the queue.
+                     Auto-skips on high risk.**
+
+  Input              Per user: last_active (timestamp), gps_lat/lng (or
+                     null), history_noshows, wait_exceeded_ratio,
+                     notification_opened (bool).
+
+  Output             bail_probability (0--100). If \> 60: flash alert
+                     sent to student screen. If \> 85: user auto-removed,
+                     queue_update emitted, SMS sent.
+
+  Backend Logic      Score formula: (inactivity_minutes × 3) +
+                     (gps_drift_km × 10) + (history_noshows × 20) +
+                     (wait_exceeded_ratio × 15). Runs every 60 seconds
+                     via setInterval per queue.
+
+  Flash Alert        Score 60--85: 'We noticed you may have stepped away.
+                     Your spot is held for 2 more minutes.' Score \> 85:
+                     user auto-removed. SMS sent.
+
+  AI Usage           None. Pure algorithmic scoring.
+  ------------------ ----------------------------------------------------
+
+**Module 4 --- Urgency Engine (Dynamic Re-Ordering)**
+
+  ------------------ ----------------------------------------------------
+  **Feature**        **Re-scores all waiting users every 60s and
+                     re-orders queue based on urgency.**
+
+  Input              For each user: fee_deadline proximity (from
+                     college_calendar.json), wait_exceeded_percent,
+                     declared_emergency (bool), distance_traveled_km.
+
+  Output             Updated positions array. Users with urgency score \>
+                     threshold bubble up. Socket.io emits new order.
+                     Flash alert sent if user's position improves
+                     significantly.
+
+  Backend Logic      urgency_score = (deadline_gap_minutes \< 30 ? 40 :
+                     0) + (wait_exceeded_percent × 0.2) +
+                     (declared_emergency ? 40 : 0) + (distance_km \> 50 ?
+                     10 : 0).
+
+  Flash Alert        If position improves by 2+: 'Good news! Your
+                     priority has been updated. You are now #N in queue.'
+
+  AI Usage           None. Rule-based scoring engine.
+  ------------------ ----------------------------------------------------
+
+**Module 5 --- Sentiment Flash Alert (UPDATED --- No Chatbot)**
+
+  -----------------------------------------------------------------------
+  ✔ CHANGE: Chatbot removed. Sentiment is now triggered automatically by
+  the system based on AI scoring of wait context, bail probability, and
+  urgency. Student does not type anything.
+
+  -----------------------------------------------------------------------
+
+  ------------------ ----------------------------------------------------
+  **Feature**        **Detects likely frustration based on queue context.
+                     Sends personalised flash message to student screen.
+                     Alerts admin if critical.**
+
+  Trigger            System-initiated. Fires when: bail_probability \> 60
+                     OR wait_exceeded_ratio \> 1.3 OR urgency_score
+                     rising rapidly.
+
+  Input              Current queue position, wait_remaining, student
+                     name, service_type, historical bail_probability.
+
+  AI Call            Claude Sentiment Scorer. Returns frustration_level
+                     (1--5) + auto_message string tailored to student
+                     name and context.
+
+  Output             Flash message auto-displayed on student waiting
+                     screen. If level ≥ 4: admin dashboard shows emoji
+                     badge on that user. If level 5: admin gets urgent
+                     alert.
+
+  No Chatbot         There is NO chat widget. Student cannot type. All
+                     messages are system-generated and displayed as flash
+                     alerts.
+
+  Admin View         Admin sees sentiment badge per user. Can optionally
+                     pause queue for high-level alerts.
+  ------------------ ----------------------------------------------------
+
+**Module 6 --- Congestion Oracle (Surge Detection)**
+
+  ------------------ ----------------------------------------------------
+  **Feature**        **Monitors join rate. Fires surge alert when queue
+                     fills faster than historical baseline.**
+
+  Input              joins_last_5min (rolling count),
+                     baseline_joins_per_5min, current_hour.
+
+  Output             If joins/5min \> 2.5× baseline: emit surge_alert.
+                     Admin sees flashing orange banner. Flash alert to
+                     all waiting students: 'High traffic detected. Your
+                     wait may be slightly longer than predicted.'
+
+  Flash Alert        Student waiting screen shows: 'Queue surge detected
+                     --- the office is experiencing higher than usual
+                     traffic right now.'
+
+  AI Usage           None. Threshold logic only.
+  ------------------ ----------------------------------------------------
+
+**Module 7 --- Fraud Shield**
+
+  ------------------ ----------------------------------------------------
+  **Feature**        **Blocks proxy joins, duplicate phone numbers, and
+                     bot-pattern registrations.**
+
+  Input              phone, gps_lat/lng, join_timestamp, user-agent.
+
+  Output             { fraud_flag: bool, confidence: number, reason:
+                     string }. If flagged: block join, emit fraud_alert
+                     to admin with confidence score.
+
+  Backend Logic      On every join: (1) Firebase query: phone already
+                     active in queue? (2) Join timestamp \< 2s from page
+                     load? (3) GPS location impossible for campus? Any
+                     positive → flag with confidence score.
+
+  AI Usage           None.
+  ------------------ ----------------------------------------------------
+
+**Module 8 --- Counter Load Balancer**
+
+  ------------------ ----------------------------------------------------
+  **Feature**        **When multiple counters are open, assigns each new
+                     user to the counter with lowest expected wait.**
+
+  Input              counters\[\] from Firebase, each with:
+                     current_queue_length, avg_service_time,
+                     current_user_start_time.
+
+  Output             counter_id assigned to new user. Shown on join
+                     confirmation. Flash alert: 'You've been assigned to
+                     Counter 2 for faster service.'
+
+  Backend Logic      expected_wait = (queue_length × avg_service_time) +
+                     time_remaining_for_current_user. Assign to
+                     min(expected_wait).
+
+  AI Usage           None. Pure math.
+  ------------------ ----------------------------------------------------
+
+**Module 9 --- AI Auto-Advance Queue (NEW --- Replaces Admin Next
+Button)**
+
+  -----------------------------------------------------------------------
+  ✔ NEW MODULE: This replaces the manual 'Call Next' button. The AI
+  auto-advance system drives all queue movement. Admin only confirms
+  physical presence.
+
+  -----------------------------------------------------------------------
+
+  ------------------ ----------------------------------------------------
+  **Feature**        **AI automatically advances the queue by calling the
+                     next user when the current service slot is free.**
+
+  Trigger            Fired when: (1) Admin clicks Attended or Removed, OR
+                     (2) AI auto-times out after 3× avg service time for
+                     current user.
+
+  Backend Logic      System picks top user from urgency-sorted queue.
+                     Sets their status to 'called'. Emits turn_called
+                     event. Sends SMS via Twilio. Shows intent on admin
+                     screen.
+
+  Admin Screen       Admin sees: called user name, token, intent
+                     category, intent details. Two buttons only: ATTENDED
+                     \| REMOVED.
+
+  ATTENDED           Admin clicked: student is physically present.
+                     Service timer starts. Status set to 'in_service'.
+                     Logged.
+
+  REMOVED            Admin clicked: student not present. Removed from
+                     queue. SMS: 'You were removed from the queue. Please
+                     rejoin if needed.' Ghost Buster rescans.
+
+  Auto-timeout       If admin does not click either button within 3×
+                     avg_service_time: system auto-marks as Removed and
+                     calls next user.
+
+  AI Usage           None for auto-advance logic itself. Intent data used
+                     was already classified at join time (Step 3).
+  ------------------ ----------------------------------------------------
+
+**Module 10 --- AI Daily Briefing**
+
+  ------------------ ----------------------------------------------------
+  **Feature**        **Each morning at 7am, admin dashboard displays a
+                     5-point AI-generated operational briefing.**
+
+  Input              Yesterday's service_history docs from Firestore:
+                     peak_hour, top_intents, accuracy_score,
+                     no_show_count, avg_wait_actual.
+
+  Output             { peak_hours, staff_recommendation, top_intents\[\],
+                     efficiency_score, actionable_tip }
+
+  Backend Logic      node-cron job at 00:05 daily. Fetches Firestore
+                     data. Sends structured prompt to Claude. Saves
+                     response to
+                     queue_learning/{queue_id}/{date}/briefing.
+
+  AI Usage           LIVE CLAUDE API CALL. Pre-generate for demo day. See
+                     Part 9 for demo-safe instructions.
+  ------------------ ----------------------------------------------------
+
+**Module 11 --- SMS Fallback**
+
+  ------------------ ----------------------------------------------------
+  **Feature**        **Students without smartphones receive turn
+                     notifications via SMS.**
+
+  Input              Phone number collected at join time. Twilio
+                     credentials in .env.
+
+  Output             SMS: 'Your turn at \[Queue Name\] --- Counter 1.
+                     Token: Q-0042.'
+
+  Backend Logic      On AI auto-advance call: trigger Twilio
+                     client.messages.create(). Wrap in try-catch --- SMS
+                     failure must NOT break queue flow.
+
+  AI Usage           None.
+  ------------------ ----------------------------------------------------
+
+**PART 4 --- AI Integration --- Practical**
+
+Claude API is used for exactly 3 live tasks + 1 nightly task. The
+chatbot (formerly AI Call #3) has been removed and replaced with
+system-initiated sentiment flash alerts. Everything else is algorithmic.
+This is intentional --- overusing Claude adds latency and cost.
+
+  -----------------------------------------------------------------------
+  ⚠ CHANGE FROM PREVIOUS VERSION: AI Call #3 (Chatbot / Sentiment on user
+  message) is REMOVED. Sentiment is now triggered automatically by the
+  system --- no user input required.
+
+  -----------------------------------------------------------------------
+
+**4.1 AI Call #1 --- Intent Classifier**
+
+  ------------------ ----------------------------------------------------
+  **Field**          **Detail**
+
+  Trigger            Every time a student submits the join form
+
+  API                claude-sonnet-4-20250514 via fetch() from backend
+                     only
+
+  Purpose            Classify free-text visit reason into one of 7
+                     categories. Handle English, Hindi, Hinglish.
+
+  Why LLM            Rule-based keyword matching fails on 'need tc for
+                     transfer admission urgent plz'. Claude handles
+                     semantic meaning, urgency tone, and mixed language.
+  ------------------ ----------------------------------------------------
+
+**Prompt Template**
+
++-----------------------------------------------------------------------+
+| const intentPrompt = (reason, queueType, calendar) =\> \`             |
+|                                                                       |
+| You are an AI assistant for a college queue system in India.          |
+|                                                                       |
+| Queue type: \${queueType}                                             |
+|                                                                       |
+| Today\'s academic calendar context: \${JSON.stringify(calendar)}      |
+|                                                                       |
+| Student visit reason (may be English, Hindi, or mixed):               |
+| \"\${reason}\"                                                        |
+|                                                                       |
+| Classify this reason. Return ONLY a valid JSON object, no preamble,   |
+| no markdown:                                                          |
+|                                                                       |
+| {                                                                     |
+|                                                                       |
+| \"category\": \"fee_payment\" \| \"bonafide_cert\" \|                 |
+| \"tc_mc_request\" \| \"scholarship\" \| \"admission\" \|              |
+| \"exam_query\" \| \"general\",                                        |
+|                                                                       |
+| \"urgency\": \"low\" \| \"medium\" \| \"high\" \| \"critical\",       |
+|                                                                       |
+| \"counter_type\": \"cashier\" \| \"document\" \| \"information\" \|   |
+| \"fast_track\",                                                       |
+|                                                                       |
+| \"est_service_minutes\": \<number\>,                                  |
+|                                                                       |
+| \"details\": \"\<one-line summary for admin screen\>\"                |
+|                                                                       |
+| }                                                                     |
+|                                                                       |
+| \`                                                                    |
++-----------------------------------------------------------------------+
+
+**4.2 AI Call #2 --- Wait Predictor**
+
+  ------------------ ----------------------------------------------------
+  **Trigger**        **On every join. Also re-called every 10 minutes for
+                     users still waiting.**
+
+  Purpose            Predict wait time with confidence interval. Accounts
+                     for service type, time of day, calendar events.
+
+  Display Format     \"11--16 min (87% confidence, based on last 3
+                     hours)\"
+
+  Why LLM            Formula-based prediction ignores service complexity
+                     variance (bonafide=3min vs TC=18min), time-of-day
+                     drift, and calendar context.
+  ------------------ ----------------------------------------------------
+
++-----------------------------------------------------------------------+
+| const waitPrompt = (data) =\> \`                                      |
+|                                                                       |
+| You are an AI wait time predictor for a college queue in India.       |
+|                                                                       |
+| Current queue state: \${JSON.stringify(data)}                         |
+|                                                                       |
+| // data shape: { people_ahead, service_type,                          |
+| avg_service_time_historical,                                          |
+|                                                                       |
+| // time_of_day, day_of_week, is_fee_deadline_today,                   |
+| is_exam_result_day,                                                   |
+|                                                                       |
+| // current_counter_count, surge_active }                              |
+|                                                                       |
+| Historical service times: fee_payment=9min, bonafide=3min,            |
+| tc_mc=18min,                                                          |
+|                                                                       |
+| scholarship=12min, admission=14min, exam_query=5min, general=7min.    |
+|                                                                       |
+| Return ONLY a JSON object:                                            |
+|                                                                       |
+| {                                                                     |
+|                                                                       |
+| \"wait_minutes\": \<median estimate\>,                                |
+|                                                                       |
+| \"lower_bound\": \<optimistic\>,                                      |
+|                                                                       |
+| \"upper_bound\": \<pessimistic\>,                                     |
+|                                                                       |
+| \"confidence\": \<0-100\>,                                            |
+|                                                                       |
+| \"reason\": \"\<one sentence for display\>\"                          |
+|                                                                       |
+| }                                                                     |
+|                                                                       |
+| \`                                                                    |
++-----------------------------------------------------------------------+
+
+**4.3 AI Call #3 --- Sentiment Flash Message Generator (UPDATED)**
+
+  -----------------------------------------------------------------------
+  ✔ UPDATED: Previously this was triggered by user chat input. Now it is
+  triggered automatically by the system based on AI monitor scores.
+  Student does not type anything.
+
+  -----------------------------------------------------------------------
+
+  ------------------ ----------------------------------------------------
+  **Trigger**        **System-initiated. Fires when bail_probability \>
+                     60 OR wait_exceeded_ratio \> 1.3 OR urgency_score
+                     rising. NOT triggered by user input.**
+
+  Purpose            Generate a personalised, empathetic flash message to
+                     display on the student's waiting screen.
+
+  Output             Flash message string + frustration_level +
+                     admin_alert boolean.
+
+  Display            Shown as a non-dismissible flash banner on the
+                     student waiting screen. Auto-clears after 8 seconds.
+  ------------------ ----------------------------------------------------
+
++-----------------------------------------------------------------------+
+| const sentimentPrompt = (context) =\> \`                              |
+|                                                                       |
+| You are an empathetic AI assistant for a college queue system.        |
+|                                                                       |
+| Student name: \${context.name}                                        |
+|                                                                       |
+| Current position: #\${context.position} (\${context.wait_remaining}   |
+| min remaining)                                                        |
+|                                                                       |
+| Queue: \${context.queue_name}                                         |
+|                                                                       |
+| Bail probability score: \${context.bail_probability}/100              |
+|                                                                       |
+| Wait exceeded by: \${context.wait_exceeded_percent}%                  |
+|                                                                       |
+| Generate a reassuring flash alert message for this student.           |
+|                                                                       |
+| Return ONLY a JSON object:                                            |
+|                                                                       |
+| {                                                                     |
+|                                                                       |
+| \"frustration_level\": \<1-5\>,                                       |
+|                                                                       |
+| \"flash_message\": \"\<personalised reassuring message using student  |
+| name and current position, max 2 sentences\>\",                       |
+|                                                                       |
+| \"admin_alert\": \<true if level \>= 4\>                              |
+|                                                                       |
+| }                                                                     |
+|                                                                       |
+| \`                                                                    |
++-----------------------------------------------------------------------+
+
+**4.4 AI Call #4 --- Daily Briefing Generator**
+
++-----------------------------------------------------------------------+
+| const briefingPrompt = (data) =\> \`                                  |
+|                                                                       |
+| You are an operational AI advisor for a college office queue system.  |
+|                                                                       |
+| Here is yesterday\'s complete queue data for \${data.queue_name}:     |
+|                                                                       |
+| \${JSON.stringify(data)}                                              |
+|                                                                       |
+| // data shape: { date, total_served, avg_wait_actual,                 |
+| avg_wait_predicted,                                                   |
+|                                                                       |
+| // accuracy_percent, peak_hour, no_show_count, top_intents\[\],       |
+|                                                                       |
+| // surge_count, upcoming_calendar_events\[\] }                        |
+|                                                                       |
+| Generate a 5-point operational briefing for the admin. Return ONLY a  |
+| JSON object:                                                          |
+|                                                                       |
+| {                                                                     |
+|                                                                       |
+| \"expected_peak\": \"\<string\>\",                                    |
+|                                                                       |
+| \"staff_recommendation\": \"\<string\>\",                             |
+|                                                                       |
+| \"top_intents\": \[\"\<intent 1\>\", \"\<intent 2\>\", \"\<intent     |
+| 3\>\"\],                                                              |
+|                                                                       |
+| \"efficiency_score\": \<0-100\>,                                      |
+|                                                                       |
+| \"actionable_tip\": \"\<one specific action admin should take         |
+| today\>\"                                                             |
+|                                                                       |
+| }                                                                     |
+|                                                                       |
+| \`                                                                    |
++-----------------------------------------------------------------------+
+
+  -----------------------------------------------------------------------
+  ⛔ WHERE NOT TO USE AI Ghost Buster: pure weighted formula --- no
+  Claude call needed. Urgency Engine: rule-based scoring --- no Claude
+  call needed. Congestion Oracle: threshold comparison --- no Claude call
+  needed. Fraud Scanner: Firebase duplicate check --- no Claude call
+  needed. Counter Compass: min(expected_wait) math --- no Claude call
+  needed. Auto-Advance Queue: algorithmic --- no Claude call needed. SMS
+  sending: Twilio API only --- no Claude call needed. Authentication:
+  Firebase Auth --- no Claude call needed.
+
+  -----------------------------------------------------------------------
+
+**PART 5 --- API Design (Updated)**
+
+All endpoints are prefixed with /api/v1. Authorization: Bearer
+\<firebase_id_token\> required for all admin endpoints.
+
+  -----------------------------------------------------------------------
+  ✔ CHANGES: POST /queue/:id/next is now AI auto-triggered, not
+  admin-triggered. POST /queue/:id/chat is REMOVED. New endpoints: POST
+  /queue/:id/attended and POST /queue/:id/removed for admin confirmation.
+
+  -----------------------------------------------------------------------
+
+**POST /queue/:id/join**
+
+  ------------------ ----------------------------------------------------
+  **Purpose**        **Student joins queue. Triggers Intent Classifier +
+                     Wait Predictor. Returns flash message for student
+                     screen.**
+
+  Request Body       { \"name\": \"Rahul Sharma\", \"phone\":
+                     \"9876543210\", \"visit_reason\": \"fee payment
+                     urgent deadline\", \"priority\": \"normal\" }
+
+  Response           { \"position\": 7, \"token\": \"Q-FEE-20251234\",
+                     \"wait_minutes\": 13, \"lower_bound\": 11,
+                     \"upper_bound\": 16, \"confidence\": 87,
+                     \"intent_category\": \"fee_payment\",
+                     \"counter_id\": \"counter_1\", \"flash_message\":
+                     \"You\'re #7 in queue --- estimated wait 13 min.
+                     Head to Counter 1 when called.\" }
+
+  Note               Rate-limited: 10 joins/hour per IP. Phone validated
+                     against active queue before saving.
+  ------------------ ----------------------------------------------------
+
+**GET /queue/:id/status**
+
+  ------------------ ----------------------------------------------------
+  **Purpose**        **Returns live queue snapshot for the join/waiting
+                     screen.**
+
+  Response           { \"queue_name\": \"Fee Cell\", \"count\": 12,
+                     \"avg_wait\": 14, \"congestion\": \"normal\",
+                     \"counters_open\": 1, \"status\": \"open\" }
+  ------------------ ----------------------------------------------------
+
+**POST /queue/:id/next (AI Auto-Advance --- Internal Only)**
+
+  ------------------ ----------------------------------------------------
+  **Purpose**        **AI auto-advance system calls next user. This is
+                     called INTERNALLY by the system, NOT by admin.
+                     Shifts positions. Triggers SMS if phone on file.**
+
+  Trigger            Called by monitorLoop.js after admin marks
+                     Attended/Removed, OR after 3× avg_service_time
+                     auto-timeout.
+
+  Request Body       { \"counter_id\": \"counter_1\", \"source\":
+                     \"auto_advance\" \| \"timeout\" }
+
+  Response           { \"called_user\": { \"name\": \"Rahul\", \"token\":
+                     \"Q-FEE-20251234\", \"intent\": \"fee_payment\",
+                     \"details\": \"Fee payment --- deadline today\" },
+                     \"counter\": \"counter_1\", \"next_in_line\": {
+                     \"name\": \"Priya\", \"urgency\": \"high\" } }
+
+  Admin Note         Admin does NOT call this endpoint. Admin sees result
+                     on screen and clicks Attended or Removed only.
+  ------------------ ----------------------------------------------------
+
+**POST /queue/:id/attended/:userId (NEW)**
+
+  ------------------ ----------------------------------------------------
+  **Purpose**        **Admin marks called user as physically present.
+                     Starts service timer. \[ADMIN ONLY\]**
+
+  Request Body       { \"counter_id\": \"counter_1\" }
+
+  Response           { \"status\": \"in_service\",
+                     \"service_started_at\": \"\<timestamp\>\", \"user\":
+                     \"Rahul Sharma\" }
+  ------------------ ----------------------------------------------------
+
+**POST /queue/:id/removed/:userId (NEW)**
+
+  ------------------ ----------------------------------------------------
+  **Purpose**        **Admin marks called user as not physically present.
+                     Removes from queue. Triggers auto-advance. \[ADMIN
+                     ONLY\]**
+
+  Request Body       { \"reason\": \"not_present\" }
+
+  Response           { \"removed_user\": \"Rahul Sharma\", \"sms_sent\":
+                     true, \"auto_advance_triggered\": true }
+  ------------------ ----------------------------------------------------
+
+**POST /queue/:id/done/:userId (Service Completed)**
+
+  ------------------ ----------------------------------------------------
+  **Purpose**        **Admin marks service as complete. Logs actual wait
+                     time. Triggers auto-advance for next user. \[ADMIN
+                     ONLY\]**
+
+  Request Body       { \"counter_id\": \"counter_1\" }
+
+  Response           { \"logged\": true, \"actual_wait_minutes\": 11,
+                     \"prediction_error\": 2, \"auto_advance_triggered\":
+                     true }
+  ------------------ ----------------------------------------------------
+
+**POST /queue/:id/skip/:userId**
+
+  ------------------ ----------------------------------------------------
+  **Purpose**        **Skip a user --- triggered by Ghost Buster
+                     auto-skip (score \> 85). Admin can also manually
+                     skip if needed. \[ADMIN + SYSTEM\]**
+
+  Request Body       { \"reason\": \"no_show\" \| \"admin_manual\",
+                     \"source\": \"ghost_buster\" \| \"admin\" }
+
+  Response           { \"skipped_user\": \"Rahul Sharma\", \"reason\":
+                     \"no_show\", \"new_queue_count\": 11 }
+  ------------------ ----------------------------------------------------
+
+**GET /queue/:id/briefing**
+
+  ------------------ ----------------------------------------------------
+  **Purpose**        **Fetch today's AI-generated morning briefing for
+                     admin dashboard. \[ADMIN ONLY\]**
+
+  Response           { \"generated_at\": \"2025-07-31T00:05:12Z\",
+                     \"expected_peak\": \"2pm--4pm (fee deadline
+                     today)\", \"staff_recommendation\": \"Open Counter 2
+                     by 1:30pm\", \"top_intents\": \[\"fee_payment
+                     (43%)\", \"bonafide_cert (28%)\", \"tc_mc_request
+                     (18%)\"\], \"efficiency_score\": 84,
+                     \"actionable_tip\": \"Pre-announce fee-payment
+                     fast-track at Counter 1 via PA system at 1pm\" }
+  ------------------ ----------------------------------------------------
+
+**REMOVED ENDPOINT**
+
+  -----------------------------------------------------------------------
+  ⛔ POST /queue/:id/chat is REMOVED in this version. Student chat
+  interface does not exist. All communication is system-initiated via
+  flash alerts. If the dev team has already built the chat endpoint, it
+  must be disabled and removed from the frontend.
+
+  -----------------------------------------------------------------------
+
+**PART 6 --- Database Design**
+
+Two databases. Firebase Realtime DB for live queue state (sub-50ms
+sync). Firestore for historical analytics and AI learning data.
+
+**6.1 Firebase Realtime DB --- Live State**
+
++-----------------------------------------------------------------------+
+| queues/                                                               |
+|                                                                       |
+| {queue_id}/                                                           |
+|                                                                       |
+| meta:                                                                 |
+|                                                                       |
+| name: string // \'Fee Cell\'                                          |
+|                                                                       |
+| type: string // \'fee_cell\' \| \'canteen\' \| \'admission\' \|       |
+| \'admin_office\'                                                      |
+|                                                                       |
+| counters_open: number // 1 or 2                                       |
+|                                                                       |
+| status: string // \'open\' \| \'paused\' \| \'closed\'                |
+|                                                                       |
+| created_at: timestamp                                                 |
+|                                                                       |
+| admin_uid: string                                                     |
+|                                                                       |
+| users/                                                                |
+|                                                                       |
+| {user_id}/                                                            |
+|                                                                       |
+| name: string                                                          |
+|                                                                       |
+| phone: string                                                         |
+|                                                                       |
+| token: string // \'Q-FEE-0042\'                                       |
+|                                                                       |
+| position: number // 1 = next to be served                             |
+|                                                                       |
+| join_time: timestamp                                                  |
+|                                                                       |
+| intent_category: string                                               |
+|                                                                       |
+| intent_details: string                                                |
+|                                                                       |
+| urgency_score: number // 0-100, recalculated every 60s                |
+|                                                                       |
+| wait_predicted: number                                                |
+|                                                                       |
+| wait_confidence: number // 0-100                                      |
+|                                                                       |
+| bail_probability: number // 0-100 from Ghost Buster                   |
+|                                                                       |
+| sentiment_level: number // 0-5, last known AI-scored level            |
+|                                                                       |
+| last_active: timestamp                                                |
+|                                                                       |
+| gps_lat: number \| null                                               |
+|                                                                       |
+| gps_lng: number \| null                                               |
+|                                                                       |
+| status: string // \'waiting\' \| \'called\' \| \'in_service\' \|      |
+| \'served\' \| \'removed\'                                             |
+|                                                                       |
+| priority: string // \'normal\' \| \'elderly\' \| \'emergency\'        |
+|                                                                       |
+| counter_id: string                                                    |
+|                                                                       |
+| last_flash_sent: timestamp // prevents flash message spam             |
+|                                                                       |
+| stats/                                                                |
+|                                                                       |
+| current_count: number                                                 |
+|                                                                       |
+| avg_wait_live: number                                                 |
+|                                                                       |
+| congestion_level: string // \'normal\' \| \'high\' \| \'surge\'       |
+|                                                                       |
+| joins_last_5min: number                                               |
+|                                                                       |
+| surge_active: boolean                                                 |
+|                                                                       |
+| counters/                                                             |
+|                                                                       |
+| {counter_id}/                                                         |
+|                                                                       |
+| label: string // \'Counter 1\'                                        |
+|                                                                       |
+| current_user_id: string \| null                                       |
+|                                                                       |
+| service_started_at: timestamp \| null                                 |
+|                                                                       |
+| expected_finish: timestamp \| null                                    |
+|                                                                       |
+| queue_length: number                                                  |
+|                                                                       |
+| auto_advance_timeout: timestamp \| null // for auto-removal timer     |
++-----------------------------------------------------------------------+
+
+**6.2 Firestore --- Historical & Analytics**
+
++-----------------------------------------------------------------------+
+| service_history/ (one document per completed service)                 |
+|                                                                       |
+| Fields: queue_id, user_id, service_type, intent_category,             |
+|                                                                       |
+| join_time, call_time, attended_time, done_time,                       |
+|                                                                       |
+| wait_predicted, wait_actual, prediction_error,                        |
+|                                                                       |
+| sentiment_peak, flash_messages_sent,                                  |
+|                                                                       |
+| attended_or_removed, removal_reason,                                  |
+|                                                                       |
+| counter_id, date_key (YYYY-MM-DD), hour_key (0-23)                    |
+|                                                                       |
+| queue_learning/ (one document per queue per day)                      |
+|                                                                       |
+| Fields: queue_id, date, accuracy_score, peak_hour,                    |
+|                                                                       |
+| avg_service_time_by_type, no_show_rate, removal_rate,                 |
+|                                                                       |
+| fraud_attempts, surge_count,                                          |
+|                                                                       |
+| ai_briefing: { expected_peak, staff_recommendation, \... },           |
+|                                                                       |
+| briefing_generated_at                                                 |
+|                                                                       |
+| user_history/ (one document per phone number)                         |
+|                                                                       |
+| Fields: phone_hash (SHA256), visit_count, no_show_count,              |
+|                                                                       |
+| removal_count, fraud_flags, avg_service_type, last_visited            |
+|                                                                       |
+| model_weights/ (one document per queue)                               |
+|                                                                       |
+| Fields: queue_id, updated_at,                                         |
+|                                                                       |
+| avg_service_times: { fee_payment: 9.2, bonafide: 3.1, \... },         |
+|                                                                       |
+| peak_hour_multipliers: \[1.0, 0.8, \..., 1.8, 2.2, \...\],            |
+|                                                                       |
+| baseline_joins_per_5min_by_hour: \[2, 1, \..., 8, 12, \...\],         |
+|                                                                       |
+| no_show_base_rate: 0.18,                                              |
+|                                                                       |
+| auto_advance_avg_service_seconds_by_type: { fee_payment: 540, \... }, |
+|                                                                       |
+| ghost_score_weights: { inactivity: 3, gps_drift: 10, history: 20,     |
+| wait_exceeded: 15 }                                                   |
++-----------------------------------------------------------------------+
+
+**PART 7 --- Tech Stack**
+
+  --------------------- ------------------------------------ ---------------
+  **Technology**        **Purpose + Notes**                  **Layer**
+
+  React 18 + Vite       Student PWA + Admin Dashboard. Vite  Frontend
+                        scaffolds in \<5s. PWA mode for      
+                        mobile.                              
+
+  TailwindCSS (CDN in   Utility-first styling. Zero config   Frontend
+  dev)                  during hackathon build.              
+
+  qrcode.react          2-line QR code generation per queue. Frontend
+
+  Socket.io (client)    Live position drop, surge banners,   Frontend
+                        flash_message events, turn           
+                        notifications.                       
+
+  recharts              7-day accuracy graph. 10 lines of    Frontend
+                        JSX.                                 
+
+  shadcn/ui             Pre-built accessible UI components.  Frontend
+                        Flash alert uses Toast component.    
+
+  Node.js v20 + Express REST server. Async I/O handles 1000+ Backend
+                        concurrent WS connections.           
+
+  Socket.io (server)    io.to(queue_id).emit() for           Backend
+                        room-scoped real-time events         
+                        including flash messages.            
+
+  Firebase Admin SDK    Server-side Firestore + RT DB + Auth Backend
+                        token verification.                  
+
+  node-cron             Midnight learning cycle. Also drives Backend
+                        auto-advance timeout checks.         
+
+  express-rate-limit    Protects /join from abuse. 10        Backend
+                        joins/hr per IP.                     
+
+  Claude API (Sonnet 4) claude-sonnet-4-20250514. 3 live     AI
+                        tasks + 1 nightly. JSON mode.        
+
+  Firebase Realtime DB  Live queue state. Sub-50ms sync.     Database
+                        Auto-scales.                         
+
+  Firestore             Historical data + AI learning        Database
+                        source.                              
+
+  Firebase Auth         Google OAuth (admin). Anonymous      Auth
+                        (student).                           
+
+  Twilio                SMS fallback. Free trial. Wrap every Third-party
+                        call in try-catch.                   
+
+  Web Push API          Browser push notifications. No       Notifications
+                        backend config needed.               
+
+  Vercel                Frontend deploy. Auto-deploy from    Deploy
+                        GitHub. Free tier.                   
+
+  Railway.app           Backend deploy. Node.js free tier.   Deploy
+                        Set env vars in dashboard.           
+  --------------------- ------------------------------------ ---------------
+
+**Package Install Commands**
+
++-----------------------------------------------------------------------+
+| \# Backend                                                            |
+|                                                                       |
+| npm install express socket.io firebase-admin cors dotenv              |
+| express-rate-limit node-cron twilio                                   |
+|                                                                       |
+| \# Frontend                                                           |
+|                                                                       |
+| npm install socket.io-client qrcode.react react-router-dom recharts   |
+|                                                                       |
+| npx shadcn-ui@latest init                                             |
+|                                                                       |
+| \# Global tools                                                       |
+|                                                                       |
+| npm install -g firebase-tools                                         |
+|                                                                       |
+| firebase login                                                        |
++-----------------------------------------------------------------------+
+
+**PART 8 --- What Client Must Provide Before Development**
+
+  -----------------------------------------------------------------------
+  ⚠ CRITICAL --- Collect ALL items below BEFORE Hackathon Day H0. Missing
+  any of these will block development. Create accounts and collect keys
+  the day before.
+
+  -----------------------------------------------------------------------
+
+**8.1 API Keys Required**
+
+  ----------------------- ----------------------------------------------------
+  **Variable Name**       **How to Get It**
+
+  ANTHROPIC_API_KEY       console.anthropic.com → API Keys → Create key.
+                          Starts with sk-ant-. THIS IS THE MOST CRITICAL KEY.
+
+  FIREBASE_API_KEY        console.firebase.google.com → Project Settings →
+                          General → Your apps → Web app config.
+
+  FIREBASE_PROJECT_ID     Same location as above.
+
+  FIREBASE_DATABASE_URL   Format:
+                          https://your-project-default-rtdb.firebaseio.com
+
+  FIREBASE_PRIVATE_KEY    Project Settings → Service Accounts → Generate new
+                          private key. Download JSON.
+
+  FIREBASE_CLIENT_EMAIL   From same Service Accounts JSON.
+
+  TWILIO_ACCOUNT_SID      console.twilio.com → Account Info. Optional for MVP.
+                          Required for SMS demo.
+
+  TWILIO_AUTH_TOKEN       Same location. Optional.
+
+  TWILIO_PHONE_NUMBER     Twilio console → Phone Numbers → Buy. Format:
+                          +1XXXXXXXXXX. Optional.
+  ----------------------- ----------------------------------------------------
+
+**8.2 college_calendar.json**
+
++-----------------------------------------------------------------------+
+| {                                                                     |
+|                                                                       |
+| \"college_name\": \"Your College Name\",                              |
+|                                                                       |
+| \"fee_deadlines\": \[\"2025-07-31\", \"2025-12-15\",                  |
+| \"2026-03-20\"\],                                                     |
+|                                                                       |
+| \"admission_season\": { \"start\": \"2025-07-01\", \"end\":           |
+| \"2025-08-15\" },                                                     |
+|                                                                       |
+| \"exam_result_days\": \[\"2025-05-20\", \"2025-11-18\"\],             |
+|                                                                       |
+| \"class_breaks\": { \"morning_break\": \"10:30\", \"lunch_break\":    |
+| \"13:00\", \"evening_break\": \"16:00\" },                            |
+|                                                                       |
+| \"high_traffic_services\": \[\"fee_payment\", \"tc_mc_request\",      |
+| \"migration_cert\"\],                                                 |
+|                                                                       |
+| \"fast_track_services\": \[\"bonafide_cert\", \"address_update\",     |
+| \"id_card\"\]                                                         |
+|                                                                       |
+| }                                                                     |
++-----------------------------------------------------------------------+
+
+**8.3 Pre-Seeded Demo Data (Firebase)**
+
+  ---------------- ------------------ -----------------------------------
+  **Name**         **Position /       **Seed Fields**
+                   Intent**           
+
+  Rahul Sharma     #1 --- fee_payment urgency:critical,
+                                      bail_probability:12,
+                                      sentiment_level:1
+
+  Priya Mehta      #2 ---             urgency:medium, bail_probability:8,
+                   bonafide_cert      sentiment_level:1
+
+  Amit Singh       #3 --- scholarship urgency:high, bail_probability:5,
+  (ELDERLY)                           sentiment_level:2, priority:elderly
+
+  Sneha Rao        #4 ---             urgency:high, bail_probability:71,
+                   tc_mc_request      sentiment_level:3
+
+  Vikram Nair      #5 --- exam_query  urgency:low, bail_probability:22,
+                                      sentiment_level:1
+  ---------------- ------------------ -----------------------------------
+
+Sneha Rao (bail_probability:71) will trigger a flash alert and
+auto-removal during the demo. This is intentional.
+
+**8.4 Pre-Generated AI Briefing (for Demo)**
+
++-----------------------------------------------------------------------+
+| // Save to Firestore: queue_learning/fee_cell/{today\'s               |
+| date}/briefing                                                        |
+|                                                                       |
+| {                                                                     |
+|                                                                       |
+| \"generated_at\": \"\<today\>T00:05:00Z\",                            |
+|                                                                       |
+| \"expected_peak\": \"2:00pm -- 4:00pm (fee deadline today at 5pm)\",  |
+|                                                                       |
+| \"staff_recommendation\": \"Open Counter 2 by 1:30pm. Assign 1        |
+| dedicated cashier.\",                                                 |
+|                                                                       |
+| \"top_intents\": \[\"Fee payment (43%)\", \"Bonafide certificate      |
+| (28%)\", \"TC / MC request (18%)\"\],                                 |
+|                                                                       |
+| \"efficiency_score\": 84,                                             |
+|                                                                       |
+| \"actionable_tip\": \"Send WhatsApp reminder at 12pm to all           |
+| pending-fee students with queue link.\"                               |
+|                                                                       |
+| }                                                                     |
++-----------------------------------------------------------------------+
+
+**PART 9 --- Demo-Safe Features**
+
+These features ensure the demo cannot fail. Every scenario must be
+tested end-to-end on mobile before presentation.
+
+**9.1 Mock Mode (Offline Fallback)**
+
++-----------------------------------------------------------------------+
+| // backend/ai/claude.js                                               |
+|                                                                       |
+| const MOCK_MODE = process.env.MOCK_MODE === \'true\';                 |
+|                                                                       |
+| async function callClaude(prompt, mockResponse) {                     |
+|                                                                       |
+| if (MOCK_MODE) {                                                      |
+|                                                                       |
+| await new Promise(r =\> setTimeout(r, 600)); // simulate latency      |
+|                                                                       |
+| return mockResponse;                                                  |
+|                                                                       |
+| }                                                                     |
+|                                                                       |
+| const response = await                                                |
+| fetch(\'https://api.anthropic.com/v1/messages\', {                    |
+|                                                                       |
+| method: \'POST\',                                                     |
+|                                                                       |
+| headers: { \'Content-Type\': \'application/json\', \'x-api-key\':     |
+| process.env.ANTHROPIC_API_KEY,                                        |
+|                                                                       |
+| \'anthropic-version\': \'2023-06-01\' },                              |
+|                                                                       |
+| body: JSON.stringify({ model: \'claude-sonnet-4-20250514\',           |
+| max_tokens: 1000,                                                     |
+|                                                                       |
+| messages: \[{ role: \'user\', content: prompt }\] })                  |
+|                                                                       |
+| });                                                                   |
+|                                                                       |
+| const data = await response.json();                                   |
+|                                                                       |
+| return JSON.parse(data.content\[0\].text);                            |
+|                                                                       |
+| }                                                                     |
++-----------------------------------------------------------------------+
+
+**9.2 Pre-Defined Mock Responses**
+
++-----------------------------------------------------------------------+
+| // backend/data/mock_responses.json                                   |
+|                                                                       |
+| {                                                                     |
+|                                                                       |
+| \"intent_classifier\": {                                              |
+|                                                                       |
+| \"category\": \"fee_payment\", \"urgency\": \"critical\",             |
+|                                                                       |
+| \"counter_type\": \"cashier\", \"est_service_minutes\": 8,            |
+|                                                                       |
+| \"details\": \"Fee payment --- deadline today at 5pm\"                |
+|                                                                       |
+| },                                                                    |
+|                                                                       |
+| \"wait_predictor\": {                                                 |
+|                                                                       |
+| \"wait_minutes\": 12, \"lower_bound\": 11, \"upper_bound\": 14,       |
+|                                                                       |
+| \"confidence\": 87, \"reason\": \"Fee deadline today --- above        |
+| average volume\"                                                      |
+|                                                                       |
+| },                                                                    |
+|                                                                       |
+| \"sentiment_flash_high\": {                                           |
+|                                                                       |
+| \"frustration_level\": 4, \"admin_alert\": true,                      |
+|                                                                       |
+| \"flash_message\": \"Hi Rahul, we know the wait feels long. You\'re   |
+| #3 in queue --- about 6 minutes away. Thank you for your patience.\"  |
+|                                                                       |
+| },                                                                    |
+|                                                                       |
+| \"sentiment_flash_normal\": {                                         |
+|                                                                       |
+| \"frustration_level\": 1, \"admin_alert\": false,                     |
+|                                                                       |
+| \"flash_message\": \"Hi! You\'re #3 in queue. Estimated wait is about |
+| 6 minutes. We appreciate your patience!\"                             |
+|                                                                       |
+| }                                                                     |
+|                                                                       |
+| }                                                                     |
++-----------------------------------------------------------------------+
+
+**9.3 Demo Scenarios**
+
+  --------------- ------------------------------- ------------------------
+  **Scenario**    **How to Execute**              **Priority**
+
+  Flash alert     Seed Sneha Rao with             MOST IMPORTANT
+  demo            bail_probability:71. Wait 60s   
+                  for system to auto-trigger      
+                  flash alert on her screen.      
+                  Admin sees sentiment badge.     
+
+  AI auto-advance Click Attended or Removed on    CRITICAL
+  demo            admin screen. System auto-calls 
+                  next user. All phones update.   
+                  No manual Next button needed.   
+
+  Fraud catch     Open 2 browser tabs. Join from  VERY IMPRESSIVE
+  demo            Tab 1. Try same phone from Tab  
+                  2. Admin sees fraud alert.      
+
+  Ghost Buster    Sneha Rao (bail_probability:71) HIGH
+  demo            auto-removed after 85           
+                  threshold. Show admin dashboard 
+                  ghost badge.                    
+
+  Surge alert     Pre-seed 20 rapid join events.  HIGH
+  demo            Admin sees surge banner. Flash  
+                  alert on all student screens.   
+
+  AI briefing     Use POST                        HIGH
+  demo            /admin/briefing/trigger. Show   
+                  admin card: \'3× traffic        
+                  expected 2--4pm --- fee         
+                  deadline today.\'               
+
+  Voice TTS demo  On AI auto-advance, browser     GOOD
+                  speaks: \'Token 42, please      
+                  proceed to Counter 1.\' Uses    
+                  Web Speech API.                 
+  --------------- ------------------------------- ------------------------
+
+**PART 10 --- Deployment & Execution Plan**
+
+**10.1 Folder Structure**
+
++-----------------------------------------------------------------------+
+| invisible-queue/                                                      |
+|                                                                       |
+| ├── backend/                                                          |
+|                                                                       |
+| │ ├── server.js \# Express entry point + Socket.io setup              |
+|                                                                       |
+| │ ├── routes/                                                         |
+|                                                                       |
+| │ │ ├── queue.js \# /queue/:id/\* endpoints                           |
+|                                                                       |
+| │ │ └── admin.js \# /admin/\* endpoints                               |
+|                                                                       |
+| │ ├── ai/                                                             |
+|                                                                       |
+| │ │ ├── claude.js \# callClaude() with MOCK_MODE support              |
+|                                                                       |
+| │ │ └── prompts.js \# All 3 live prompt template functions            |
+|                                                                       |
+| │ ├── monitors/                                                       |
+|                                                                       |
+| │ │ ├── ghostBuster.js \# Bail probability scoring                    |
+|                                                                       |
+| │ │ ├── urgencyEngine.js \# Dynamic queue re-ordering                 |
+|                                                                       |
+| │ │ ├── congestionOracle.js \# Surge detection                        |
+|                                                                       |
+| │ │ ├── fraudScanner.js \# Duplicate + bot detection                  |
+|                                                                       |
+| │ │ ├── counterCompass.js \# Load balancing                           |
+|                                                                       |
+| │ │ └── autoAdvance.js \# NEW: AI auto-queue movement                 |
+|                                                                       |
+| │ ├── jobs/                                                           |
+|                                                                       |
+| │ │ ├── nightlyBriefing.js \# node-cron at 00:05                      |
+|                                                                       |
+| │ │ └── monitorLoop.js \# setInterval(60000) per queue                |
+|                                                                       |
+| │ ├── middleware/                                                     |
+|                                                                       |
+| │ │ ├── auth.js                                                       |
+|                                                                       |
+| │ │ └── rateLimit.js                                                  |
+|                                                                       |
+| │ ├── socket/                                                         |
+|                                                                       |
+| │ │ └── socketHandlers.js \# io.on(\'connection\') handlers +         |
+| flash_message emit                                                    |
+|                                                                       |
+| │ ├── firebase/                                                       |
+|                                                                       |
+| │ │ └── init.js                                                       |
+|                                                                       |
+| │ └── data/                                                           |
+|                                                                       |
+| │ ├── college_calendar.json                                           |
+|                                                                       |
+| │ ├── mock_responses.json                                             |
+|                                                                       |
+| │ └── mock_briefing.json                                              |
+|                                                                       |
+| ├── frontend/                                                         |
+|                                                                       |
+| │ └── src/                                                            |
+|                                                                       |
+| │ ├── pages/                                                          |
+|                                                                       |
+| │ │ ├── StudentApp.jsx \# QR join + live position + flash alerts      |
+|                                                                       |
+| │ │ └── AdminDashboard.jsx \# Monitor-only view + Attended/Removed    |
+| buttons                                                               |
+|                                                                       |
+| │ ├── components/                                                     |
+|                                                                       |
+| │ │ ├── QueueCard.jsx \# Position + wait display                      |
+|                                                                       |
+| │ │ ├── FlashAlert.jsx \# NEW: Flash message banner (replaces         |
+| ChatWidget)                                                           |
+|                                                                       |
+| │ │ ├── AdminBriefing.jsx \# AI morning briefing card                 |
+|                                                                       |
+| │ │ ├── AccuracyGraph.jsx \# recharts 7-day line chart                |
+|                                                                       |
+| │ │ ├── AttendedRemovedBar.jsx \# NEW: Admin confirmation buttons     |
+|                                                                       |
+| │ │ └── SurgeAlert.jsx \# Flashing orange banner                      |
+|                                                                       |
+| │ └── hooks/                                                          |
+|                                                                       |
+| │ ├── useQueue.js                                                     |
+|                                                                       |
+| │ └── useSocket.js                                                    |
+|                                                                       |
+| └── .gitignore \# Must include: .env, node_modules                    |
++-----------------------------------------------------------------------+
+
+**10.2 Production Deployment**
+
+  ------------------ ----------------------------------------------------
+  **Step**           **Instructions**
+
+  Frontend → Vercel  Push frontend/ to GitHub. Connect repo in
+                     vercel.com. Set VITE\_\* env vars in Vercel
+                     dashboard. Deploy.
+
+  Backend → Railway  Connect backend/ repo in railway.app. Set all
+                     backend .env vars in Railway dashboard. Deploy.
+
+  Update .env after  Set VITE_BACKEND_URL and VITE_SOCKET_URL in Vercel
+  deploy             to your Railway backend URL. CORS origin in
+                     server.js must include Vercel domain.
+
+  Test on mobile     Open Vercel URL on phone. Scan the QR code for
+                     \'fee_cell\' queue. Join should work end-to-end.
+                     Confirm flash alerts appear.
+
+  Print QR poster    Use QR code generated for queue ID \'fee_cell\'.
+                     Print on A4. Judges scan this during demo.
+  ------------------ ----------------------------------------------------
+
+**10.3 Pre-Demo Checklist**
+
+  ----------------------- ---------------------------------- -------------
+  **Checklist Item**      **Verification**                   **Status**
+
+  All accounts created    Anthropic Console · Firebase ·     □
+                          Vercel · Railway · GitHub · Twilio 
+
+  All keys in .env        ANTHROPIC_API_KEY · FIREBASE\_\* · □
+                          TWILIO\_\* --- all tested          
+
+  Firebase seeded         5 demo users pre-loaded in         □
+                          Realtime DB                        
+
+  Mock briefing saved     Realistic AI briefing in Firestore □
+
+  college_calendar.json   Real fee deadlines, exam dates,    □
+  filled                  class breaks                       
+
+  QR code printed         A4 poster for fee_cell queue ---   □
+                          physical, ready                    
+
+  Both URLs deployed      Vercel frontend + Railway backend  □
+                          --- tested on mobile               
+
+  Flash alerts tested     Flash message appears on student   □
+                          screen for each trigger scenario   
+
+  Auto-advance tested     AI auto-calls next user after      □
+                          Attended/Removed. No Next button   
+                          needed.                            
+
+  Chatbot confirmed       No chat widget anywhere in         □
+  removed                 frontend code                      
+
+  All 7 demo scenarios    Flash alert · Auto-advance · Fraud □
+  tested                  catch · Ghost Buster · Surge ·     
+                          Briefing · Voice TTS               
+
+  Pitch rehearsed 3×      3-minute pitch with all WOW        □
+                          moments confirmed working          
+  ----------------------- ---------------------------------- -------------
+
+**PART 11 --- Pitch Script & Viva Q&A**
+
+**3-Minute Pitch Structure**
+
+  ------------------ ----------------------------------------------------
+  **Section**        **Script**
+
+  Opening (20 sec)   \"Every day, 1,400 students at this college lose a
+                     combined 2,800 hours standing in queues. We built an
+                     AI that gives those hours back.\"
+
+  The Problem (30    \"Fee deadline at 3pm. Student joins at 2:30pm. 25
+  sec)               people ahead. No one knows who will leave. No one
+                     knows who just needs a 2-minute bonafide cert. This
+                     is how colleges have worked for 50 years. We're
+                     changing that --- now.\"
+
+  Solution Reveal    \"Scan this QR. In 3 seconds, our AI has classified
+  (40 sec)           why you're here, checked your fee deadline, scored
+                     your urgency, predicted your wait with 88% accuracy,
+                     and assigned you to the optimal counter. The admin
+                     didn't touch a single button.\"
+
+  AI Deep Dive (50   \"The AI calls the next user automatically --- admin
+  sec)               only confirms whether they showed up. This student
+                     has been inactive for 8 minutes. Watch --- Ghost
+                     Buster AI auto-removes them and the flash alert
+                     fires on the next user's screen. That is AI ---
+                     live.\"
+
+  College Angle (20  \"We didn't build a queue app. We built a college
+  sec)               queue BRAIN. It knows your fee deadlines, admission
+                     season, and lunch breaks --- and uses that to make
+                     smarter decisions every 60 seconds.\"
+
+  Close (20 sec)     \"Other teams digitized the queue. We gave it
+                     intelligence. We are not managing queues. We are
+                     managing human time --- with an AI that never
+                     sleeps, never guesses, and gets smarter every single
+                     day it runs.\"
+  ------------------ ----------------------------------------------------
+
+**Viva Q&A --- AI-Level Answers**
+
+  ------------------ ----------------------------------------------------
+  **Judge Question** **Your Answer**
+
+  Isn't this just    An LLM is a tool. Our system is the blueprint that
+  calling an API?    makes it intelligent --- scoring models, learning
+  Not real AI.       loop, decision triggers --- all ours. Same
+                     distinction as GPT vs ChatGPT: the tool vs the
+                     product.
+
+  Why remove the     The chatbot was reactive --- it only responded after
+  chatbot?           a student typed something frustrated. Our system is
+                     proactive. The AI monitors queue state continuously
+                     and sends empathetic flash messages BEFORE the
+                     student even feels frustrated. That's smarter
+                     design.
+
+  Why does admin not Because human bottlenecks destroy queue efficiency.
+  control the queue? When the admin has to click Next, the queue pauses
+                     every time they're distracted. Our AI advances the
+                     queue continuously. Admin is freed to focus on the
+                     human in front of them --- not a screen.
+
+  What if AI makes   Day 1: 68% accurate using conservative formula. Day
+  wrong predictions? 7: \~85% after learning. Day 30: 95%+. A system that
+                     improves over time is more valuable than one
+                     statically perfect on Day 1.
+
+  How is this        Token systems are offline, static, non-transparent.
+  different from a   Our system gives real-time position, AI wait
+  token system?      estimates, push notifications, flash alerts, remote
+                     waiting, and fraud detection. Name one token system
+                     that detects likely abandonment and proactively
+                     reassures the student.
+  ------------------ ----------------------------------------------------
+
+***\"Other teams will digitize the queue. You will give it a brain.\"***
+
+Invisible Queue System --- Developer Handoff --- Final Version ---
+Prepared for Antigravity
