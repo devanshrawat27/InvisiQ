@@ -27,6 +27,13 @@ async function verifyToken(req, res, next) {
 
   const token = authHeader.split('Bearer ')[1];
 
+  // ─── HACKATHON BYPASS ──────────────
+  if (token === 'hackathon-bypass-token') {
+    req.user = { uid: 'hackathon', name: 'Admin Demo' };
+    return next();
+  }
+  // ───────────────────────────────────
+
   try {
     const decoded = await auth.verifyIdToken(token);
     req.user = decoded;

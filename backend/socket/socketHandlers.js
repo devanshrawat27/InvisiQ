@@ -22,13 +22,15 @@ function initSocketHandlers(io) {
       console.log(`📱 User ${userId || 'anonymous'} joined room: ${roomName}`);
     });
 
-    // ── Admin joins admin room ───────────────────────────────────
+    // ── Admin joins admin room + queue room ─────────────────────
     socket.on('join_admin_room', ({ queueId }) => {
-      const roomName = `admin_${queueId}`;
-      socket.join(roomName);
+      const adminRoom = `admin_${queueId}`;
+      const queueRoom = `queue_${queueId}`;
+      socket.join(adminRoom);
+      socket.join(queueRoom); // Also join queue room to receive queue_update, turn_called, etc.
       socket.queueId = queueId;
       socket.isAdmin = true;
-      console.log(`🛡️  Admin joined room: ${roomName}`);
+      console.log(`🛡️  Admin joined rooms: ${adminRoom} + ${queueRoom}`);
     });
 
     // ── Student heartbeat (updates last_active for Ghost Buster) ─

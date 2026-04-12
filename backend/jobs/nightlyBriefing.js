@@ -4,12 +4,12 @@
  * Cron job fires at 00:05 daily.
  * Reads all service_history docs for today.
  * Computes accuracy. Updates model_weights.
- * Sends full daily summary to Claude for briefing generation.
+ * Sends full daily summary to Gemini for briefing generation.
  */
 
 const cron = require('node-cron');
 const { db, firestore } = require('../firebase/init');
-const { callClaude } = require('../ai/claude');
+const { callGemini } = require('../ai/gemini');
 const { briefingPrompt } = require('../ai/prompts');
 const { DEFAULT_SERVICE_TIMES } = require('../monitors/counterCompass');
 const mockBriefing = require('../data/mock_briefing.json');
@@ -162,7 +162,7 @@ async function generateBriefingForQueue(queueId, dateKey) {
       upcoming_calendar_events: [],
     };
 
-    const briefing = await callClaude(briefingPrompt(data), mockBriefing);
+    const briefing = await callGemini(briefingPrompt(data), mockBriefing);
 
     // ── Save to Firestore ────────────────────────────────────────
     await firestore.collection('queue_learning').doc(`${queueId}_${dateKey}`).set({

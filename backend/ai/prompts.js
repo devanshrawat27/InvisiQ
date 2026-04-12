@@ -1,7 +1,7 @@
 /**
  * AI Prompt Templates
  * --------------------
- * All 4 Claude API prompt functions live here.
+ * All 4 Gemini API prompt functions live here.
  * These are the EXACT templates from the handoff document.
  *
  *   1. intentPrompt     — Intent Classifier (on join)

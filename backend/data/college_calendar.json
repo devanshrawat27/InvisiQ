@@ -1,8 +1,8 @@
 {
-  "college_name": "Demo College — Hackathon 2025",
-  "fee_deadlines": ["2025-07-31", "2025-12-15", "2026-03-20"],
-  "admission_season": { "start": "2025-07-01", "end": "2025-08-15" },
-  "exam_result_days": ["2025-05-20", "2025-11-18"],
+  "college_name": "Demo College — Hackathon 2026",
+  "fee_deadlines": ["2026-04-11", "2026-04-15", "2026-07-31", "2026-12-15"],
+  "admission_season": { "start": "2026-07-01", "end": "2026-08-15" },
+  "exam_result_days": ["2026-04-20", "2026-05-20", "2026-11-18"],
   "class_breaks": {
     "morning_break": "10:30",
     "lunch_break": "13:00",

@@ -12,7 +12,8 @@
  * AI Usage: NONE — Pure algorithmic scoring.
  */
 
-const { db } = require('../firebase/init');
+const { db, firestore } = require('../firebase/init');
+const { recalcPositions } = require('../utils/queueHelpers');
 
 /**
  * Run Ghost Buster scan on all waiting users in a queue.
@@ -140,6 +141,24 @@ async function runGhostBuster(queueId, io) {
         }
 
         console.log(`👻 Ghost Buster: Removed ${user.name} (bail: ${bailProbability}%)`);
+
+        // Update user_history no-show count
+        try {
+          const crypto = require('crypto');
+          const phoneHash = crypto.createHash('sha256').update(user.phone).digest('hex');
+          const historyDoc = await firestore.collection('user_history').doc(phoneHash).get();
+          const existing = historyDoc.exists ? historyDoc.data() : {};
+          await firestore.collection('user_history').doc(phoneHash).set({
+            phone_hash: phoneHash,
+            no_show_count: (existing.no_show_count || 0) + 1,
+            last_visited: now,
+          }, { merge: true });
+        } catch (e) {
+          // Non-critical
+        }
+
+        // Recalculate positions for remaining users
+        await recalcPositions(queueId, io);
       }
     }
   } catch (err) {

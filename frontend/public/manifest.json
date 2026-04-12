@@ -1,0 +1,21 @@
+{
+  "name": "Invisible Queue",
+  "short_name": "Queue",
+  "description": "AI-powered virtual queue for college offices",
+  "start_url": "/",
+  "display": "standalone",
+  "theme_color": "#1a7db9",
+  "background_color": "#f7f9fb",
+  "icons": [
+    {
+      "src": "/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png"
+    },
+    {
+      "src": "/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png"
+    }
+  ]
+}

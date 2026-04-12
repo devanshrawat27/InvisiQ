@@ -11,7 +11,7 @@
  *   4. Fraud Scanner — periodic recheck
  *   5. Counter Compass — load rebalancing
  *   + Auto-Timeout check
- *   + Sentiment Flash trigger (Claude API)
+ *   + Sentiment Flash trigger (Gemini API)
  */
 
 const { db } = require('../firebase/init');
@@ -20,13 +20,14 @@ const { runUrgencyEngine } = require('../monitors/urgencyEngine');
 const { runCongestionOracle } = require('../monitors/congestionOracle');
 const { runFraudScanner } = require('../monitors/fraudScanner');
 const { runCounterCompass } = require('../monitors/counterCompass');
-const { checkAutoTimeout } = require('../monitors/autoAdvance');
-const { callClaude } = require('../ai/claude');
+const { checkAutoTimeout, advanceQueue } = require('../monitors/autoAdvance');
+const { callGemini } = require('../ai/gemini');
 const { sentimentPrompt } = require('../ai/prompts');
 const mockResponses = require('../data/mock_responses.json');
 
-// Track active monitor intervals
+// Track active monitor intervals and cycle counts
 const activeIntervals = {};
+const cycleCounters = {};
 
 /**
  * Start the monitor loop for a specific queue.
@@ -58,9 +59,24 @@ function startMonitorLoop(queueId, io) {
       // ── Check auto-timeout ─────────────────────────────────────
       await checkAutoTimeout(queueId, io);
 
+      // ── Auto-advance idle counters ──────────────────────────────
+      // If a counter has no current user, auto-call the next waiting user
+      await advanceIdleCounters(queueId, io);
+
+      // ── Wait Predictor re-call every 10 min (~10 cycles) ────────
+      if (!cycleCounters[queueId]) cycleCounters[queueId] = 0;
+      cycleCounters[queueId]++;
+      if (cycleCounters[queueId] % 10 === 0) {
+        await refreshWaitPredictions(queueId, io);
+      }
+
       // ── Sentiment Flash Trigger ────────────────────────────────
       // Check if any users need sentiment-based flash messages
       await triggerSentimentFlash(queueId, io);
+
+      // ── Periodic Status Updates ────────────────────────────────
+      // Send every waiting student their current position + wait time
+      await sendPeriodicUpdates(queueId, io);
 
       // ── Reset joins_last_5min counter periodically ─────────────
       // Decrement by ~20% each cycle to naturally decay
@@ -174,7 +190,7 @@ async function triggerSentimentFlash(queueId, io) {
 
       if (!shouldTrigger) continue;
 
-      // ── Claude API: Sentiment Flash Message ─────────────────
+      // ── Gemini API: Sentiment Flash Message ─────────────────
       const context = {
         name: user.name,
         position: user.position,
@@ -189,7 +205,7 @@ async function triggerSentimentFlash(queueId, io) {
         ? mockResponses.sentiment_flash_high
         : mockResponses.sentiment_flash_normal;
 
-      const sentimentResult = await callClaude(
+      const sentimentResult = await callGemini(
         sentimentPrompt(context),
         mockResponse
       );
@@ -224,6 +240,149 @@ async function triggerSentimentFlash(queueId, io) {
     }
   } catch (err) {
     console.error('❌ Sentiment flash trigger error:', err.message);
+  }
+}
+
+/**
+ * Auto-advance idle counters.
+ * If a counter has no current user and there are waiting users,
+ * automatically call the next user to that counter.
+ */
+async function advanceIdleCounters(queueId, io) {
+  try {
+    const countersRef = db.ref(`queues/${queueId}/counters`);
+    const snapshot = await countersRef.get();
+
+    if (!snapshot.exists()) return;
+
+    const counters = snapshot.val();
+
+    // Check for waiting users
+    const usersRef = db.ref(`queues/${queueId}/users`);
+    const usersSnap = await usersRef.get();
+    if (!usersSnap.exists()) return;
+
+    const users = usersSnap.val();
+    const hasWaiting = Object.values(users).some(u => u.status === 'waiting');
+    if (!hasWaiting) return;
+
+    for (const [counterId, counter] of Object.entries(counters)) {
+      // Counter is idle — no user assigned and no pending timeout
+      if (!counter.current_user_id && !counter.auto_advance_timeout) {
+        await advanceQueue(queueId, counterId, 'auto_advance', io);
+      }
+    }
+  } catch (err) {
+    console.error('❌ advanceIdleCounters error:', err.message);
+  }
+}
+
+/**
+ * Send periodic status updates to every waiting student.
+ * Called every 60 seconds from the monitor loop.
+ * No AI call — just reads position from Firebase and sends via socket.
+ */
+async function sendPeriodicUpdates(queueId, io) {
+  if (!io) return;
+
+  try {
+    const usersRef = db.ref(`queues/${queueId}/users`);
+    const snapshot = await usersRef.get();
+    if (!snapshot.exists()) return;
+
+    const users = snapshot.val();
+
+    // Get stats for avg_service_time
+    const statsRef = db.ref(`queues/${queueId}/stats`);
+    const statsSnap = await statsRef.get();
+    const stats = statsSnap.exists() ? statsSnap.val() : {};
+    const avgServiceTime = stats.avg_service_time || 7;
+
+    const metaRef = db.ref(`queues/${queueId}/meta`);
+    const metaSnap = await metaRef.get();
+    const meta = metaSnap.exists() ? metaSnap.val() : {};
+    const countersOpen = meta.counters_open || 1;
+
+    let updatedCount = 0;
+
+    for (const [userId, user] of Object.entries(users)) {
+      if (user.status !== 'waiting') continue;
+
+      const position = user.position || '?';
+      // Recalculate wait based on current position
+      const estimatedWait = Math.round(((position - 1) * avgServiceTime) / countersOpen);
+
+      io.to(`queue_${queueId}`).emit('flash_message', {
+        target_user: userId,
+        message: `You are still #${position} in queue. Estimated wait: ~${estimatedWait} min.`,
+        type: 'info',
+        duration: 8000,
+      });
+
+      updatedCount++;
+    }
+
+    if (updatedCount > 0) {
+      console.log(`📢 Periodic updates sent to ${updatedCount} waiting user(s) in ${queueId}`);
+    }
+  } catch (err) {
+    console.error('❌ sendPeriodicUpdates error:', err.message);
+  }
+}
+
+/**
+ * Refresh wait predictions for all waiting users.
+ * Called every ~10 minutes (every 10th monitor cycle).
+ * Uses formula-based calculation: people_ahead × avg_service_time / counters_open
+ */
+async function refreshWaitPredictions(queueId, io) {
+  try {
+    const usersRef = db.ref(`queues/${queueId}/users`);
+    const snapshot = await usersRef.get();
+
+    if (!snapshot.exists()) return;
+
+    const users = snapshot.val();
+
+    const statsRef = db.ref(`queues/${queueId}/stats`);
+    const statsSnap = await statsRef.get();
+    const stats = statsSnap.exists() ? statsSnap.val() : {};
+    const avgServiceTime = stats.avg_service_time || 7;
+    const totalServed = stats.total_served || 0;
+
+    const metaRef = db.ref(`queues/${queueId}/meta`);
+    const metaSnap = await metaRef.get();
+    const meta = metaSnap.exists() ? metaSnap.val() : {};
+    const countersOpen = meta.counters_open || 1;
+
+    // Get waiting users sorted by position
+    const waitingUsers = Object.entries(users)
+      .filter(([, u]) => u.status === 'waiting')
+      .sort((a, b) => (a[1].position || 999) - (b[1].position || 999));
+
+    const confidence = Math.min(95, Math.round(50 + (totalServed / (totalServed + 10)) * 45));
+
+    for (let i = 0; i < waitingUsers.length; i++) {
+      const [userId] = waitingUsers[i];
+      const estimatedWait = Math.round((i * avgServiceTime) / countersOpen);
+
+      // Update the user's wait prediction
+      await db.ref(`queues/${queueId}/users/${userId}`).update({
+        wait_predicted: estimatedWait,
+        wait_confidence: confidence,
+      });
+    }
+
+    // Update the live avg_wait in stats (based on first waiting user)
+    if (waitingUsers.length > 0) {
+      await statsRef.update({
+        avg_wait_live: Math.round(((waitingUsers.length - 1) * avgServiceTime) / countersOpen),
+      });
+    }
+
+    console.log(`⏱️  Wait predictions refreshed for ${waitingUsers.length} users in ${queueId} (avg_service: ${avgServiceTime}min)`);
+  } catch (err) {
+    console.error('❌ refreshWaitPredictions error:', err.message);
   }
 }
 

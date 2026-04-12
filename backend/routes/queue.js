@@ -13,13 +13,31 @@ const express = require('express');
 const router = express.Router();
 
 const { db, firestore } = require('../firebase/init');
-const { callClaude } = require('../ai/claude');
-const { intentPrompt, waitPrompt } = require('../ai/prompts');
+const { callGemini } = require('../ai/gemini');
+const { intentPrompt } = require('../ai/prompts');
 const { scanForFraud, hashPhone } = require('../monitors/fraudScanner');
 const { assignCounter } = require('../monitors/counterCompass');
 const { joinLimiter } = require('../middleware/rateLimit');
+const { recalcPositions } = require('../utils/queueHelpers');
 const calendar = require('../data/college_calendar.json');
 const mockResponses = require('../data/mock_responses.json');
+
+
+/**
+ * Keyword-based intent classifier — fallback when Gemini is unavailable.
+ * Matches the user's visit_reason text to the correct intent category.
+ * Returns null if no strong match (keeps whatever Gemini/mock returned).
+ */
+function classifyByKeywords(reasonLower) {
+  // Order matters — more specific matches first
+  if (/scholar|stipend|freeship/.test(reasonLower)) return 'scholarship';
+  if (/bonafide|bona fide|character cert|certificate/.test(reasonLower)) return 'bonafide_cert';
+  if (/transfer cert|tc |migration|leaving cert|mc /.test(reasonLower)) return 'tc_mc_request';
+  if (/admission|enroll|new student|branch change|course change/.test(reasonLower)) return 'admission';
+  if (/exam|result|re.?eval|backlog|hall ticket|admit card/.test(reasonLower)) return 'exam_query';
+  if (/fee|payment|challan|receipt|refund|dues|hostel fee/.test(reasonLower)) return 'fee_payment';
+  return 'general';
+}
 
 /**
  * POST /queue/:id/join
@@ -43,6 +61,19 @@ router.post('/:id/join', joinLimiter, async (req, res) => {
         error: 'Validation failed',
         message: 'Phone must be a 10-digit number.',
       });
+    }
+
+    // ── Check if queue is paused/closed ──────────────────────────
+    const metaCheckRef = db.ref(`queues/${queueId}/meta`);
+    const metaCheckSnap = await metaCheckRef.get();
+    if (metaCheckSnap.exists()) {
+      const metaCheck = metaCheckSnap.val();
+      if (metaCheck.status === 'paused' || metaCheck.status === 'closed') {
+        return res.status(403).json({
+          error: 'Queue unavailable',
+          message: `This queue is currently ${metaCheck.status}. Please try again later.`,
+        });
+      }
     }
 
     // ── Get Socket.io instance ───────────────────────────────────
@@ -78,37 +109,43 @@ router.post('/:id/join', joinLimiter, async (req, res) => {
     const metaSnap = await metaRef.get();
     const meta = metaSnap.exists() ? metaSnap.val() : { name: queueId, type: queueId };
 
-    // ── AI Calls: Intent Classifier + Wait Predictor (parallel) ──
+    // ── AI Intent Classifier ──────────────────────────────────────
     const currentCount = stats.current_count || 0;
     const now = new Date();
 
-    const [intentResult, waitResult] = await Promise.all([
-      callClaude(
-        intentPrompt(visit_reason, meta.type || queueId, calendar),
-        mockResponses.intent_classifier
-      ),
-      callClaude(
-        waitPrompt({
-          people_ahead: currentCount,
-          service_type: 'general', // Will be updated after intent classification
-          avg_service_time_historical: 7,
-          time_of_day: `${now.getHours()}:${String(now.getMinutes()).padStart(2, '0')}`,
-          day_of_week: now.toLocaleDateString('en', { weekday: 'long' }),
-          is_fee_deadline_today: calendar.fee_deadlines.includes(now.toISOString().slice(0, 10)),
-          is_exam_result_day: calendar.exam_result_days.includes(now.toISOString().slice(0, 10)),
-          current_counter_count: meta.counters_open || 1,
-          surge_active: stats.surge_active || false,
-        }),
-        mockResponses.wait_predictor
-      ),
-    ]);
+    const intentResult = await callGemini(
+      intentPrompt(visit_reason, meta.type || queueId, calendar),
+      mockResponses.intent_classifier
+    );
+
+    // ── Keyword-based fallback when Gemini is unavailable ─────────
+    // The mock always returns "fee_payment". Override with actual keyword match.
+    const reasonLower = visit_reason.toLowerCase();
+    const detectedCategory = classifyByKeywords(reasonLower);
+    if (detectedCategory) {
+      intentResult.category = detectedCategory;
+      intentResult.details = visit_reason;
+    }
+
+    // ── Wait Time Calculation (formula-based) ────────────────────
+    // people_ahead = position - 1; estimated_wait = people_ahead × avg_service_time / counters
+    // Position 1 → 0 min (you're next), Position 3 → 2 × avg, etc.
+    const avgServiceTime = stats.avg_service_time || 7; // default 7 min if no data yet
+    const countersOpen = meta.counters_open || 1;
+    const position = currentCount + 1;
+    const peopleAhead = position - 1;
+    const estimatedWait = Math.round((peopleAhead * avgServiceTime) / countersOpen);
+    const lowerBound = Math.max(1, Math.round(estimatedWait * 0.8));
+    const upperBound = Math.round(estimatedWait * 1.3);
+    const totalServed = stats.total_served || 0;
+    // Confidence grows with more data: starts at 50%, approaches 95% as more people are served
+    const confidence = Math.min(95, Math.round(50 + (totalServed / (totalServed + 10)) * 45));
 
     // ── Counter Assignment ───────────────────────────────────────
     const counterAssignment = await assignCounter(queueId, intentResult.category);
 
     // ── Save user to Firebase RT DB ──────────────────────────────
     const userId = `user_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-    const position = currentCount + 1;
 
     const userData = {
       name,
@@ -121,8 +158,8 @@ router.post('/:id/join', joinLimiter, async (req, res) => {
       intent_details: intentResult.details,
       intent_urgency: intentResult.urgency,
       urgency_score: intentResult.urgency === 'critical' ? 80 : intentResult.urgency === 'high' ? 60 : intentResult.urgency === 'medium' ? 30 : 10,
-      wait_predicted: waitResult.wait_minutes,
-      wait_confidence: waitResult.confidence,
+      wait_predicted: estimatedWait,
+      wait_confidence: confidence,
       bail_probability: 0,
       sentiment_level: 0,
       last_active: Date.now(),
@@ -140,7 +177,7 @@ router.post('/:id/join', joinLimiter, async (req, res) => {
     // ── Update queue stats ───────────────────────────────────────
     await statsRef.update({
       current_count: position,
-      avg_wait_live: waitResult.wait_minutes,
+      avg_wait_live: estimatedWait,
       joins_last_5min: (stats.joins_last_5min || 0) + 1,
     });
 
@@ -158,14 +195,14 @@ router.post('/:id/join', joinLimiter, async (req, res) => {
     }
 
     // ── Socket.io: Broadcast queue update ────────────────────────
-    const flashMessage = `You're #${position} in queue — estimated wait ${waitResult.wait_minutes} min. Head to ${counterAssignment.counter_label} when called.`;
+    const flashMessage = `You're #${position} in queue — estimated wait ${estimatedWait} min. Head to ${counterAssignment.counter_label} when called.`;
 
     if (io) {
       io.to(`queue_${queueId}`).emit('queue_update', {
         action: 'user_joined',
         position,
         count: position,
-        avg_wait: waitResult.wait_minutes,
+        avg_wait: estimatedWait,
       });
 
       io.to(`queue_${queueId}`).emit('flash_message', {
@@ -176,15 +213,18 @@ router.post('/:id/join', joinLimiter, async (req, res) => {
       });
     }
 
+    // ── SMS: Confirmation on join ─────────────────────────────
+    sendJoinSMS(userData, queueId, position, estimatedWait, counterAssignment.counter_label);
+
     // ── Response ─────────────────────────────────────────────────
     return res.status(201).json({
       userId,
       position,
       token,
-      wait_minutes: waitResult.wait_minutes,
-      lower_bound: waitResult.lower_bound,
-      upper_bound: waitResult.upper_bound,
-      confidence: waitResult.confidence,
+      wait_minutes: estimatedWait,
+      lower_bound: lowerBound,
+      upper_bound: upperBound,
+      confidence,
       intent_category: intentResult.category,
       intent_details: intentResult.details,
       counter_id: counterAssignment.counter_id,
@@ -340,6 +380,9 @@ router.post('/:id/skip/:userId', async (req, res) => {
       }
     }
 
+    // Recalculate positions for remaining users
+    await recalcPositions(queueId, io);
+
     return res.json({
       skipped_user: user.name,
       reason: reason || 'no_show',
@@ -394,4 +437,63 @@ router.get('/:id/users', async (req, res) => {
   }
 });
 
+/**
+ * GET /queue/:id/requirements
+ * Returns the document requirements for a queue (public, for students).
+ */
+router.get('/:id/requirements', async (req, res) => {
+  try {
+    const queueId = req.params.id;
+
+    const reqRef = db.ref(`queues/${queueId}/meta/requirements`);
+    const reqSnap = await reqRef.get();
+
+    if (!reqSnap.exists()) {
+      return res.json({ requirements: [] });
+    }
+
+    const requirements = reqSnap.val();
+    // Ensure it's an array
+    const list = Array.isArray(requirements)
+      ? requirements
+      : Object.values(requirements);
+
+    return res.json({ requirements: list });
+  } catch (err) {
+    console.error('❌ Requirements fetch error:', err);
+    return res.status(500).json({ error: 'Internal server error', message: err.message });
+  }
+});
+
 module.exports = router;
+
+/**
+ * Send SMS confirmation when a user joins the queue.
+ * Wrapped in try-catch — SMS failure must NOT block join.
+ */
+function sendJoinSMS(user, queueId, position, waitMinutes, counterLabel) {
+  try {
+    const accountSid = process.env.TWILIO_ACCOUNT_SID;
+    const authToken = process.env.TWILIO_AUTH_TOKEN;
+    const fromPhone = process.env.TWILIO_PHONE_NUMBER;
+
+    if (!accountSid || !authToken || !fromPhone || accountSid === 'your-account-sid') {
+      console.log('📱 Join SMS skipped — Twilio not configured');
+      return;
+    }
+
+    const twilio = require('twilio');
+    const client = twilio(accountSid, authToken);
+
+    client.messages.create({
+      body: `Invisible Queue: You are #${position} in line. Token: ${user.token}. Estimated wait: ~${waitMinutes} min. Go to ${counterLabel} when called.`,
+      from: fromPhone,
+      to: `+91${user.phone}`,
+    })
+      .then(() => console.log(`📱 Join SMS sent to ${user.phone.slice(-4)}`))
+      .catch((err) => console.warn(`⚠️  Join SMS failed (Twilio trial — only verified numbers): ${err.message}`));
+  } catch (err) {
+    // Silent fail — non-critical
+    console.warn('⚠️  Join SMS error (non-blocking):', err.message);
+  }
+}

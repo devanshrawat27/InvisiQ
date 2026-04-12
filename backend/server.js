@@ -3,7 +3,7 @@
  * ║         INVISIBLE QUEUE SYSTEM — Express + Socket.io Server     ║
  * ║                                                                  ║
  * ║  AI-First Virtual Queue Engine for Indian College Offices        ║
- * ║  Claude API · Firebase · Socket.io · 5 AI Monitors              ║
+ * ║  Gemini API · Firebase · Socket.io · 5 AI Monitors              ║
  * ╚══════════════════════════════════════════════════════════════════╝
  */
 
@@ -86,15 +86,23 @@ app.get('/', (req, res) => {
     description: 'AI-First Virtual Queue Engine for Indian College Offices',
     endpoints: {
       health: '/api/health',
-      queue_status: '/api/v1/queue/:id/status',
+      queue_status: 'GET /api/v1/queue/:id/status',
       queue_join: 'POST /api/v1/queue/:id/join',
-      queue_users: '/api/v1/queue/:id/users',
+      queue_position: 'GET /api/v1/queue/:id/position/:userId',
+      queue_users: 'GET /api/v1/queue/:id/users',
+      queue_skip: 'POST /api/v1/queue/:id/skip/:userId',
       admin_attended: 'POST /api/v1/admin/queue/:id/attended/:userId',
       admin_removed: 'POST /api/v1/admin/queue/:id/removed/:userId',
       admin_done: 'POST /api/v1/admin/queue/:id/done/:userId',
-      admin_briefing: '/api/v1/admin/queue/:id/briefing',
+      admin_next: 'POST /api/v1/admin/queue/:id/next (internal)',
+      admin_briefing: 'GET /api/v1/admin/queue/:id/briefing',
+      admin_briefing_trigger: 'POST /api/v1/admin/briefing/trigger',
       admin_create_queue: 'POST /api/v1/admin/queue/create',
       admin_seed: 'POST /api/v1/admin/queue/:id/seed',
+      admin_pause: 'POST /api/v1/admin/queue/:id/pause',
+      admin_resume: 'POST /api/v1/admin/queue/:id/resume',
+      queue_requirements: 'GET /api/v1/queue/:id/requirements',
+      admin_requirements: 'POST /api/v1/admin/queue/:id/requirements',
     },
   });
 });

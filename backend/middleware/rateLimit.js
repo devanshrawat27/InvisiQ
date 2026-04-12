@@ -7,10 +7,10 @@
 
 const rateLimit = require('express-rate-limit');
 
-// Rate limiter for join endpoint — 10 joins per hour per IP
+// Rate limiter for join endpoint — Relaxed for testing (1000 joins per hour)
 const joinLimiter = rateLimit({
   windowMs: 60 * 60 * 1000, // 1 hour
-  max: 10,
+  max: 1000,
   standardHeaders: true,
   legacyHeaders: false,
   message: {
@@ -20,10 +20,10 @@ const joinLimiter = rateLimit({
   },
 });
 
-// General API rate limiter — 100 requests per 15 min
+// General API rate limiter — Relaxed for polling (5000 requests per 15 min)
 const apiLimiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 100,
+  max: 5000,
   standardHeaders: true,
   legacyHeaders: false,
   message: {
