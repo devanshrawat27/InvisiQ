@@ -105,11 +105,3 @@ npm run dev
 ```
 
 ---
-
-<div align="center">
-
-*Built for hackathons. Designed for the real world.*
-
-**InvisiQ** · No more standing in line.
-
-</div>
