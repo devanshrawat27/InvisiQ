@@ -1,91 +1,115 @@
 <div align="center">
-  
-# 🔮 InvisiQ (Invisible Queue System)
-**AI-First Virtual Queue Engine for Indian College Offices**
 
-![Project Status](https://img.shields.io/badge/Status-Live-success?style=for-the-badge)
-![Tech Stack](https://img.shields.io/badge/React-18-blue?style=for-the-badge&logo=react)
-![Tech Stack](https://img.shields.io/badge/Node.js-Express-green?style=for-the-badge&logo=nodedotjs)
-![Tech Stack](https://img.shields.io/badge/AI-Google_Gemini-orange?style=for-the-badge)
-![Tech Stack](https://img.shields.io/badge/Database-Firebase-yellow?style=for-the-badge&logo=firebase)
+<br/>
+
+```
+██╗███╗   ██╗██╗   ██╗██╗███████╗██╗ ██████╗
+██║████╗  ██║██║   ██║██║██╔════╝██║██╔═══██╗
+██║██╔██╗ ██║██║   ██║██║███████╗██║██║   ██║
+██║██║╚██╗██║╚██╗ ██╔╝██║╚════██║██║██║▄▄ ██║
+██║██║ ╚████║ ╚████╔╝ ██║███████║██║╚██████╔╝
+╚═╝╚═╝  ╚═══╝  ╚═══╝  ╚═╝╚══════╝╚═╝ ╚══▀▀═╝
+```
+
+**The Invisible Queue · No Lines. No Waiting. No Chaos.**
+
+<br/>
+
+[![Live](https://img.shields.io/badge/●_LIVE-00C853?style=flat-square&labelColor=0a0a0a)](https://invisi-q.vercel.app)
+[![React](https://img.shields.io/badge/React_18-61DAFB?style=flat-square&logo=react&logoColor=black&labelColor=0a0a0a)](https://react.dev)
+[![Firebase](https://img.shields.io/badge/Firebase-FFCA28?style=flat-square&logo=firebase&logoColor=black&labelColor=0a0a0a)](https://firebase.google.com)
+[![Gemini AI](https://img.shields.io/badge/Gemini_AI-4285F4?style=flat-square&logo=google&logoColor=white&labelColor=0a0a0a)](https://deepmind.google/technologies/gemini/)
+
+<br/>
 
 </div>
 
-## 📌 Overview
-InvisiQ is an advanced, AI-powered waitlist and virtual queue platform designed to eliminate physical standing queues outside busy college administration offices (like Fee Cells, Admission Cells, etc.). 
+---
 
-It digitizes the queuing process while deploying intelligent AI monitors that actively observe the queue's state and automatically handle stale, fraudulent, or overly congested lines.
+## What is InvisiQ?
 
-## ✨ Key Features
-- **🌐 Seamless "Join Queue" Flow:** Students join by scanning a QR code or visiting a link — no app downloads required.
-- **🛡️ Multi-Cell Architecture:** Completely isolated states for different college offices (e.g., Admission Cell, Fee Cell).
-- **⚡ Real-time Updates:** Powered by Socket.io, providing live feedback to students regarding their position and estimated wait times.
-- **🤖 5 Specialized AI Monitors (Powered by Google Gemini):**
-  - `Ghost Buster AI`: Detects and removes "ghost" users who abandoned the queue.
-  - `Congestion Oracle AI`: Predicts severe bottlenecks and pauses queues automatically.
-  - `Fraud Scanner AI`: Prevents span and duplicate entries.
-  - `Urgency Engine AI`: Adjusts wait-time calculations dynamically based on throughput.
-  - `Counter Compass AI`: Smartly routes students to the most optimal counter.
+InvisiQ is an AI-powered virtual queue system built for Indian college administration offices — Fee Cells, Admission Cells, and beyond. Students join a live digital queue by scanning a QR code. No app. No account. No standing in line.
+
+Five specialized AI monitors run silently in the background, keeping the queue clean, fair, and real-time.
 
 ---
 
-## 🛠️ Technology Stack
-- **Frontend**: React 18, Vite, Tailwind CSS, Recharts
-- **Backend**: Node.js, Express, Socket.io
-- **Database & Auth**: Firebase Realtime Database, Firebase Admin SDK
-- **AI Integration**: Google Gemini API
-
----
-
-## 🚀 Live Links
-- **Student Portal (Frontend)**: [https://invisi-q.vercel.app](https://invisi-q.vercel.app)
-- **Backend API**: [https://invisiq.onrender.com](https://invisiq.onrender.com)
-
----
-
-## 🔐 Admin Dashboard Access
-
-As an administrator, you have full control over the queues, counters, and AI monitors.
-
-**How to log in:**
-1. Go to the live admin URL: 👉 **[https://invisi-q.vercel.app/admin](https://invisi-q.vercel.app/admin)**
-2. You will be prompted to log in using the Admin's configured Email and Password.
-3. Once logged in, you can select the specific Queue Cell (e.g., Fee Cell) to manage.
-
-**What you can do as an Admin:**
-- **Call Next User**: Ping the next student in line to approach the counter.
-- **Mark Attended/Removed/Done**: Update the live status of the current user.
-- **Pause/Resume Queue**: Temporarily halt new entries if the office gets too crowded.
-- **View AI Briefings**: Get an AI-generated summary of queue performance and recommendations using the Nightly Briefing tool.
-
----
-
-## 💻 Local Development
-
-1. **Clone the repository:**
-   ```bash
-   git clone https://github.com/devanshrawat27/InvisiQ.git
-   cd InvisiQ
-   ```
-
-2. **Setup the Backend:**
-   ```bash
-   cd backend
-   npm install
-   # Create a .env file based on the config.js requirements!
-   npm start
-   ```
-
-3. **Setup the Frontend:**
-   ```bash
-   cd frontend
-   npm install
-   npm run dev
-   ```
-
-## 📄 License
-This project is proprietary and intended for hackathons / educational purposes.
+## Try It — Scan to Join
 
 <div align="center">
-  <i>Powered by AI · No more standing in line.</i>
+
+| 🏛️ Admission Cell | 💸 Fee Cell |
+|:---:|:---:|
+| <img src="admission_cell_qr_code.png" width="160"/> | <img src="fee_cell_qr_code.png" width="160"/> |
+| Scan to join the Admission queue | Scan to join the Fee queue |
+
+*Or visit directly → [invisi-q.vercel.app](https://invisi-q.vercel.app)*
+
+</div>
+
+---
+
+## AI Monitors
+
+Five autonomous monitors run continuously on every queue:
+
+| Monitor | Role |
+|---|---|
+| **Ghost Buster** | Removes users who silently abandoned the queue |
+| **Congestion Oracle** | Predicts bottlenecks and auto-pauses before chaos |
+| **Fraud Scanner** | Blocks spam entries and duplicate registrations |
+| **Urgency Engine** | Dynamically recalculates wait times based on live throughput |
+| **Counter Compass** | Routes students to the fastest available counter |
+
+---
+
+## Tech Stack
+
+```
+Frontend   →  React 18 · Vite · Tailwind CSS · Recharts
+Backend    →  Node.js · Express · Socket.io
+Database   →  Firebase Realtime Database
+AI         →  Google Gemini API
+Deploy     →  Vercel (frontend) · Render (backend)
+```
+
+---
+
+## Admin Access
+
+1. Go to **[invisi-q.vercel.app/admin](https://invisi-q.vercel.app/admin)**
+2. Sign in with your admin credentials
+3. Select your cell — Fee or Admission
+
+**Controls available:** Call next · Mark attended · Pause queue · AI Nightly Briefing
+
+> Admin credentials are distributed separately. Contact the project maintainer.
+
+---
+
+## Local Setup
+
+```bash
+# Clone
+git clone https://github.com/devanshrawat27/InvisiQ.git
+cd InvisiQ
+
+# Backend
+cd backend && npm install
+# Add .env with Firebase + Gemini keys
+npm start
+
+# Frontend (new terminal)
+cd frontend && npm install
+npm run dev
+```
+
+---
+
+<div align="center">
+
+*Built for hackathons. Designed for the real world.*
+
+**InvisiQ** · No more standing in line.
+
 </div>
