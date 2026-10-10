@@ -1,21 +1,13 @@
 /**
- * Counter Compass — Counter Load Balancer
- * ------------------------------------------
- * When multiple counters are open, assigns each new user
- * to the counter with lowest expected wait.
- *
- * Formula:
- *   expected_wait = (queue_length × avg_service_time)
- *                 + time_remaining_for_current_user
- *
- * Assign to min(expected_wait).
- *
- * AI Usage: NONE — Pure math.
+ * Counter Compass — counter recommendation
+ * -----------------------------------------
+ * Given a service type, recommend the counter with the lowest expected wait.
+ * Pure advisory: it does NOT mutate state and never assigns an unavailable
+ * (in-service) counter. Actual assignment happens when a user is called.
  */
 
 const { db } = require('../firebase/init');
 
-// Default service times (minutes) from handoff doc
 const DEFAULT_SERVICE_TIMES = {
   fee_payment: 9,
   bonafide_cert: 3,
@@ -26,118 +18,69 @@ const DEFAULT_SERVICE_TIMES = {
   general: 7,
 };
 
-/**
- * Find the optimal counter for a new user.
- * @param {string} queueId
- * @param {string} serviceType — The intent category of the user
- * @returns {object} { counter_id, counter_label, expected_wait }
- */
+function statusOf(counter) {
+  if (!counter) return 'idle';
+  if (counter.status) return counter.status;
+  if (counter.current_user_id) return counter.service_started_at ? 'in_service' : 'serving';
+  return 'idle';
+}
+
 async function assignCounter(queueId, serviceType) {
   try {
-    const countersRef = db.ref(`queues/${queueId}/counters`);
-    const snapshot = await countersRef.get();
-
-    // Default: single counter
-    if (!snapshot.exists()) {
-      return {
-        counter_id: 'counter_1',
-        counter_label: 'Counter 1',
-        expected_wait: 0,
-      };
+    const [countersSnap, usersSnap] = await Promise.all([
+      db.ref(`queues/${queueId}/counters`).get(),
+      db.ref(`queues/${queueId}/users`).get(),
+    ]);
+    if (!countersSnap.exists()) {
+      return { counter_id: 'counter_1', counter_label: 'Counter 1', expected_wait: 0 };
     }
-
-    const counters = snapshot.val();
+    const counters = countersSnap.val();
+    const users = usersSnap.exists() ? usersSnap.val() : {};
+    const avg = DEFAULT_SERVICE_TIMES[serviceType] || 7;
     const now = Date.now();
 
-    let bestCounter = null;
+    let best = null;
     let minWait = Infinity;
-
     for (const [counterId, counter] of Object.entries(counters)) {
-      const queueLength = counter.queue_length || 0;
-      const avgServiceTime = DEFAULT_SERVICE_TIMES[serviceType] || 7;
-
-      // Time remaining for current user at this counter
-      let timeRemaining = 0;
-      if (counter.current_user_id && counter.service_started_at) {
-        const serviceStarted = counter.service_started_at;
-        const expectedFinish = counter.expected_finish || (serviceStarted + avgServiceTime * 60 * 1000);
-        timeRemaining = Math.max(0, (expectedFinish - now) / (1000 * 60));
+      const status = statusOf(counter);
+      if (status === 'in_service') continue;
+      const supported = counter.supported_types || [];
+      const compatible = supported.length === 0 || supported.includes(serviceType);
+      const queued = Object.values(users).filter(u => u && u.status === 'waiting' && u.counter_id === counterId).length;
+      let remaining = 0;
+      if (status === 'serving' && counter.service_started_at) {
+        const finish = counter.estimated_free_at || (counter.service_started_at + avg * 60000);
+        remaining = Math.max(0, (finish - now) / 60000);
       }
-
-      // Expected wait = queued users × avg time + current user remaining
-      const expectedWait = (queueLength * avgServiceTime) + timeRemaining;
-
-      if (expectedWait < minWait) {
-        minWait = expectedWait;
-        bestCounter = {
-          counter_id: counterId,
-          counter_label: counter.label || counterId.replace('_', ' '),
-          expected_wait: Math.round(expectedWait),
-        };
+      const expected = queued * avg + remaining + (compatible ? 0 : 3);
+      if (expected < minWait) {
+        minWait = expected;
+        best = { counter_id: counterId, counter_label: counter.label || counterId.replace('_', ' '), expected_wait: Math.round(expected) };
       }
     }
-
-    if (!bestCounter) {
-      return {
-        counter_id: 'counter_1',
-        counter_label: 'Counter 1',
-        expected_wait: 0,
-      };
-    }
-
-    // Increment queue_length at the assigned counter
-    await db.ref(`queues/${queueId}/counters/${bestCounter.counter_id}`).update({
-      queue_length: (counters[bestCounter.counter_id].queue_length || 0) + 1,
-    });
-
-    return bestCounter;
+    return best || { counter_id: 'counter_1', counter_label: 'Counter 1', expected_wait: 0 };
   } catch (err) {
     console.error('❌ Counter Compass error:', err.message);
-    return {
-      counter_id: 'counter_1',
-      counter_label: 'Counter 1',
-      expected_wait: 0,
-    };
+    return { counter_id: 'counter_1', counter_label: 'Counter 1', expected_wait: 0 };
   }
 }
 
 /**
- * Run Counter Compass rebalance across all counters.
- * Called every 60s by monitorLoop.
+ * Periodic counter availability snapshot (advisory).
  */
 async function runCounterCompass(queueId, io) {
-  const result = { counters_checked: 0, rebalanced: false };
-
+  const result = { counters_checked: 0, idle: 0, busy: 0 };
   try {
-    const countersRef = db.ref(`queues/${queueId}/counters`);
-    const snapshot = await countersRef.get();
-
-    if (!snapshot.exists()) return result;
-
-    const counters = snapshot.val();
-    const usersRef = db.ref(`queues/${queueId}/users`);
-    const usersSnap = await usersRef.get();
-    const users = usersSnap.exists() ? usersSnap.val() : {};
-
-    // Recount actual queue lengths per counter
-    for (const counterId of Object.keys(counters)) {
+    const snap = await db.ref(`queues/${queueId}/counters`).get();
+    if (!snap.exists()) return result;
+    for (const counter of Object.values(snap.val())) {
       result.counters_checked++;
-      let count = 0;
-
-      for (const [userId, user] of Object.entries(users)) {
-        if (user.counter_id === counterId && user.status === 'waiting') {
-          count++;
-        }
-      }
-
-      await db.ref(`queues/${queueId}/counters/${counterId}`).update({
-        queue_length: count,
-      });
+      if (statusOf(counter) === 'idle') result.idle++;
+      else result.busy++;
     }
   } catch (err) {
-    console.error('❌ Counter Compass rebalance error:', err.message);
+    console.error('❌ Counter Compass error:', err.message);
   }
-
   return result;
 }
 

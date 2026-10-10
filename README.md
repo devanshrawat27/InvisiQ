@@ -72,7 +72,7 @@ As an administrator, you have full control over the queues, counters, and AI mon
    ```bash
    cd backend
    npm install
-   # Create a .env file based on the config.js requirements!
+   cp .env.example .env   # then fill in the values
    npm start
    ```
 
@@ -82,6 +82,46 @@ As an administrator, you have full control over the queues, counters, and AI mon
    npm install
    npm run dev
    ```
+
+### Tests
+```bash
+cd backend
+npm test          # end-to-end API tests (needs the server running)
+npm run test:unit # queue service + monitors, in-memory (no server)
+```
+`cd frontend && npm run build` to verify the production bundle.
+
+### Running without any cloud services
+Set `MOCK_MODE=true` in `backend/.env` to run fully offline: queue state is stored
+in memory and AI calls return mock responses. Handy for local development.
+
+---
+
+## 🏭 Production Deployment
+
+Set the following environment variables on the backend host:
+
+| Variable | Notes |
+|---|---|
+| `NODE_ENV` | `production` |
+| `JWT_SECRET` | **Required.** A long random string. The server refuses to start in production without it. |
+| `FIREBASE_PROJECT_ID`, `FIREBASE_DATABASE_URL`, `FIREBASE_PRIVATE_KEY`, `FIREBASE_CLIENT_EMAIL` | Firebase Admin service-account credentials |
+| `GEMINI_API_KEY` | Google Gemini API key |
+| `CORS_ORIGIN` | Comma-separated list of allowed frontend origins (no `*` with credentials) |
+| `MOCK_MODE` | `false` |
+| `PORT` | Server port |
+
+Frontend (`frontend/.env`): `VITE_BACKEND_URL`, `VITE_SOCKET_URL`, and the
+`VITE_FIREBASE_*` client config.
+
+**Security notes**
+- Admin auth uses username/password JWTs (bcrypt-hashed, 24h expiry, login rate-limited).
+- Google sign-in is accepted **only** for Firebase identities already linked to an admin
+  account (matching `firebase_uid` or username); unlinked identities are rejected.
+- There are no demo/bypass tokens. Seed/simulate demo endpoints were removed.
+- Public endpoints are rate-limited; admin endpoints enforce per-cell authorization.
+
+> ⚠️ Never commit `.env` files. Rotate any credentials that were ever shared.
 
 ## 📄 License
 This project is proprietary and intended for hackathons / educational purposes.

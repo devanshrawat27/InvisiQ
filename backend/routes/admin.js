@@ -10,7 +10,6 @@
  *   GET  /admin/queue/:id/briefing          — Get AI morning briefing
  *   POST /admin/briefing/trigger            — Manually trigger briefing
  *   POST /admin/queue/create                — Create a new queue
- *   POST /admin/queue/:id/seed              — Seed demo users
  */
 
 const express = require('express');
@@ -18,84 +17,35 @@ const router = express.Router();
 
 const { db, firestore } = require('../firebase/init');
 const { requireAdmin } = require('../middleware/auth');
-const { advanceQueue } = require('../monitors/autoAdvance');
-const { callGemini } = require('../ai/gemini');
-const { briefingPrompt } = require('../ai/prompts');
-const { DEFAULT_SERVICE_TIMES } = require('../monitors/counterCompass');
+const { checkCellAccess } = require('../middleware/jwtAuth');
+const queueService = require('../services/queueService');
 const { startMonitorLoop } = require('../jobs/monitorLoop');
-const { recalcPositions } = require('../utils/queueHelpers');
-const mockBriefing = require('../data/mock_briefing.json');
+const { generateBriefingForQueue } = require('../jobs/nightlyBriefing');
+const { dateKey, parseDateKey } = require('../utils/dates');
 
 // ─── Apply admin auth middleware to ALL routes in this router ────────────────
 router.use(requireAdmin);
 
+// ─── Enforce per-cell authorization on every route that targets a queue ──────
+// cell_admin accounts may only manage their assigned cells; super_admin sees all.
+router.param('id', (req, res, next) => checkCellAccess(req, res, next));
+
 /**
  * POST /admin/queue/:id/attended/:userId
- * Admin marks called user as physically present. Starts service timer.
+ * Admin marks a called user as physically present (starts service).
  */
 router.post('/queue/:id/attended/:userId', async (req, res) => {
   try {
     const { id: queueId, userId } = req.params;
     const { counter_id } = req.body;
     const io = req.app.get('io');
-    const now = Date.now();
 
-    const userRef = db.ref(`queues/${queueId}/users/${userId}`);
-    const userSnap = await userRef.get();
-
-    if (!userSnap.exists()) {
-      return res.status(404).json({ error: 'User not found' });
+    const result = await queueService.markArrived(queueId, userId, counter_id, io);
+    if (!result.ok) {
+      const code = result.reason === 'no_user' ? 404 : 400;
+      return res.status(code).json({ error: result.reason, status: result.status });
     }
-
-    const user = userSnap.val();
-
-    if (user.status !== 'called') {
-      return res.status(400).json({
-        error: 'Invalid state',
-        message: `User status is '${user.status}', expected 'called'.`,
-      });
-    }
-
-    const counterId = counter_id || user.counter_id || 'counter_1';
-    const avgServiceTime = DEFAULT_SERVICE_TIMES[user.intent_category] || 7;
-
-    // Update user status
-    await userRef.update({
-      status: 'in_service',
-      attended_at: now,
-    });
-
-    // Update counter — start service timer
-    await db.ref(`queues/${queueId}/counters/${counterId}`).update({
-      service_started_at: now,
-      expected_finish: now + (avgServiceTime * 60 * 1000),
-      auto_advance_timeout: now + (avgServiceTime * 3 * 60 * 1000), // Reset timeout
-    });
-
-    // Emit admin update
-    if (io) {
-      io.to(`admin_${queueId}`).emit('user_attended', {
-        userId,
-        name: user.name,
-        counter: counterId,
-        service_started_at: now,
-      });
-
-      io.to(`queue_${queueId}`).emit('queue_update', {
-        action: 'user_in_service',
-        userId,
-        counter: counterId,
-      });
-    }
-
-    console.log(`✅ Attended: ${user.name} at ${counterId}`);
-
-    return res.json({
-      status: 'in_service',
-      service_started_at: now,
-      user: user.name,
-      counter: counterId,
-    });
+    return res.json({ status: 'in_service', user: result.user, counter: result.counter, service_started_at: Date.now() });
   } catch (err) {
     console.error('❌ Attended error:', err);
     return res.status(500).json({ error: 'Internal server error', message: err.message });
@@ -104,100 +54,26 @@ router.post('/queue/:id/attended/:userId', async (req, res) => {
 
 /**
  * POST /admin/queue/:id/removed/:userId
- * Admin marks called user as not physically present. Removes from queue.
- * Triggers auto-advance.
+ * Admin marks a user as not present (no-show). Optionally auto-advances.
  */
 router.post('/queue/:id/removed/:userId', async (req, res) => {
   try {
     const { id: queueId, userId } = req.params;
     const { reason } = req.body;
     const io = req.app.get('io');
-    const now = Date.now();
 
-    const userRef = db.ref(`queues/${queueId}/users/${userId}`);
-    const userSnap = await userRef.get();
-
-    if (!userSnap.exists()) {
-      return res.status(404).json({ error: 'User not found' });
+    const result = await queueService.markNoShow(queueId, userId, reason || 'not_present', io, 'admin');
+    if (!result.ok) {
+      const code = result.reason === 'no_user' ? 404 : 400;
+      return res.status(code).json({ error: result.reason, status: result.status });
     }
-
-    const user = userSnap.val();
-    const counterId = user.counter_id || 'counter_1';
-
-    // Mark as removed
-    await userRef.update({
-      status: 'removed',
-      removed_reason: reason || 'not_present',
-      removed_at: now,
-    });
-
-    // Increment no-show count in user_history
-    try {
-      const { hashPhone } = require('../monitors/fraudScanner');
-      const phoneHash = hashPhone(user.phone);
-      const historyDoc = await firestore.collection('user_history').doc(phoneHash).get();
-      const existing = historyDoc.exists ? historyDoc.data() : {};
-      await firestore.collection('user_history').doc(phoneHash).set({
-        phone_hash: phoneHash,
-        no_show_count: (existing.no_show_count || 0) + 1,
-        removal_count: (existing.removal_count || 0) + 1,
-        last_visited: now,
-      }, { merge: true });
-    } catch (e) {
-      // Non-critical
-    }
-
-    // Recalculate positions for remaining users
-    await recalcPositions(queueId, io);
-
-    // Log to service_history
-    try {
-      await firestore.collection('service_history').add({
-        queue_id: queueId,
-        user_id: userId,
-        service_type: user.intent_category,
-        intent_category: user.intent_category,
-        join_time: user.join_time,
-        removed_at: now,
-        attended_or_removed: 'removed',
-        removal_reason: reason || 'not_present',
-        counter_id: counterId,
-        date_key: new Date().toISOString().slice(0, 10),
-        hour_key: new Date().getHours(),
-      });
-    } catch (e) {
-      // Non-critical
-    }
-
-    // Emit updates
-    if (io) {
-      io.to(`queue_${queueId}`).emit('queue_update', {
-        action: 'user_removed',
-        userId,
-        reason: reason || 'not_present',
-      });
-
-      io.to(`admin_${queueId}`).emit('user_removed', {
-        userId,
-        name: user.name,
-        reason: reason || 'not_present',
-      });
-    }
-
-    // SMS notification
-    sendRemovalSMS(user, queueId);
-
-    // Auto-advance to next user
-    const advanceResult = await advanceQueue(queueId, counterId, 'admin_removed', io);
-
-    console.log(`❌ Removed: ${user.name} — reason: ${reason || 'not_present'}`);
-
+    const status = await queueService.getStatus(queueId);
     return res.json({
-      removed_user: user.name,
+      removed_user: userId,
       reason: reason || 'not_present',
-      sms_sent: true,
-      auto_advance_triggered: true,
-      next_user: advanceResult.called_user ? advanceResult.called_user.name : null,
+      auto_advance_triggered: !!result.next_user,
+      next_user: result.next_user ? result.next_user.name : null,
+      waiting_count: status.waiting_count,
     });
   } catch (err) {
     console.error('❌ Removed error:', err);
@@ -207,137 +83,22 @@ router.post('/queue/:id/removed/:userId', async (req, res) => {
 
 /**
  * POST /admin/queue/:id/done/:userId
- * Admin marks service as complete. Logs actual wait time. Triggers auto-advance.
+ * Admin marks service as complete. Optionally auto-advances.
  */
 router.post('/queue/:id/done/:userId', async (req, res) => {
   try {
     const { id: queueId, userId } = req.params;
-    const { counter_id } = req.body;
     const io = req.app.get('io');
-    const now = Date.now();
 
-    const userRef = db.ref(`queues/${queueId}/users/${userId}`);
-    const userSnap = await userRef.get();
-
-    if (!userSnap.exists()) {
-      return res.status(404).json({ error: 'User not found' });
+    const result = await queueService.markComplete(queueId, userId, io);
+    if (!result.ok) {
+      const code = result.reason === 'no_user' ? 404 : 400;
+      return res.status(code).json({ error: result.reason, status: result.status });
     }
-
-    const user = userSnap.val();
-    const counterId = counter_id || user.counter_id || 'counter_1';
-
-    // Calculate actual wait (total time from join to done)
-    const actualWait = Math.round((now - (user.join_time || now)) / (1000 * 60));
-    const predictionError = Math.abs(actualWait - (user.wait_predicted || 0));
-
-    // Calculate actual service time (time from attended/called to done)
-    const serviceStartTime = user.attended_at || user.called_at || user.join_time || now;
-    const actualServiceTime = Math.max(1, Math.round((now - serviceStartTime) / (1000 * 60)));
-
-    // Update user status
-    await userRef.update({
-      status: 'served',
-      done_at: now,
-      actual_wait: actualWait,
-      actual_service_time: actualServiceTime,
-    });
-
-    // ── Update running average service time in RT DB stats ────────
-    // new_avg = (old_avg × total_served + actual_service_time) / (total_served + 1)
-    try {
-      const statsRef = db.ref(`queues/${queueId}/stats`);
-      const statsSnap = await statsRef.get();
-      const stats = statsSnap.exists() ? statsSnap.val() : {};
-      const oldAvg = stats.avg_service_time || 7;
-      const totalServed = stats.total_served || 0;
-      const newAvg = Math.round(((oldAvg * totalServed + actualServiceTime) / (totalServed + 1)) * 10) / 10;
-
-      await statsRef.update({
-        avg_service_time: newAvg,
-        total_served: totalServed + 1,
-      });
-
-      console.log(`📊 Updated avg_service_time: ${oldAvg} → ${newAvg} (served: ${totalServed + 1})`);
-    } catch (e) {
-      console.warn('⚠️  Stats update failed (non-blocking):', e.message);
-    }
-
-    // Recalculate positions for remaining users
-    await recalcPositions(queueId, io);
-
-    // Log to service_history in Firestore
-    try {
-      await firestore.collection('service_history').add({
-        queue_id: queueId,
-        user_id: userId,
-        service_type: user.intent_category,
-        intent_category: user.intent_category,
-        join_time: user.join_time,
-        call_time: user.called_at,
-        attended_time: user.attended_at,
-        done_time: now,
-        wait_predicted: user.wait_predicted,
-        wait_actual: actualWait,
-        prediction_error: predictionError,
-        sentiment_peak: user.sentiment_level,
-        flash_messages_sent: 0,
-        attended_or_removed: 'attended',
-        counter_id: counterId,
-        date_key: new Date().toISOString().slice(0, 10),
-        hour_key: new Date().getHours(),
-      });
-    } catch (e) {
-      console.warn('⚠️  Firestore log failed (non-blocking):', e.message);
-    }
-
-    // Update model_weights — rolling weighted average (30% today, 70% history)
-    try {
-      const weightsDoc = await firestore.collection('model_weights').doc(queueId).get();
-      const weights = weightsDoc.exists ? weightsDoc.data() : {};
-      const serviceTimes = weights.avg_service_times || {};
-      const currentAvg = serviceTimes[user.intent_category] || DEFAULT_SERVICE_TIMES[user.intent_category] || 7;
-      const serviceTime = user.attended_at ? (now - user.attended_at) / (1000 * 60) : currentAvg;
-      const newAvg = (0.3 * serviceTime) + (0.7 * currentAvg);
-
-      await firestore.collection('model_weights').doc(queueId).set({
-        queue_id: queueId,
-        updated_at: now,
-        avg_service_times: {
-          ...serviceTimes,
-          [user.intent_category]: Math.round(newAvg * 10) / 10,
-        },
-      }, { merge: true });
-    } catch (e) {
-      // Non-critical
-    }
-
-    // Emit update
-    if (io) {
-      io.to(`queue_${queueId}`).emit('queue_update', {
-        action: 'service_completed',
-        userId,
-        actual_wait: actualWait,
-      });
-
-      io.to(`admin_${queueId}`).emit('service_completed', {
-        userId,
-        name: user.name,
-        actual_wait: actualWait,
-        prediction_error: predictionError,
-      });
-    }
-
-    // Auto-advance to next user
-    const advanceResult = await advanceQueue(queueId, counterId, 'auto_advance', io);
-
-    console.log(`✅ Done: ${user.name} — actual wait: ${actualWait}min, error: ${predictionError}min`);
-
     return res.json({
       logged: true,
-      actual_wait_minutes: actualWait,
-      prediction_error: predictionError,
-      auto_advance_triggered: true,
-      next_user: advanceResult.called_user ? advanceResult.called_user.name : null,
+      auto_advance_triggered: !!result.next_user,
+      next_user: result.next_user ? result.next_user.name : null,
     });
   } catch (err) {
     console.error('❌ Done error:', err);
@@ -352,7 +113,7 @@ router.post('/queue/:id/done/:userId', async (req, res) => {
 router.get('/queue/:id/briefing', async (req, res) => {
   try {
     const queueId = req.params.id;
-    const today = new Date().toISOString().slice(0, 10);
+    const today = dateKey();
 
     // Try to get from Firestore
     try {
@@ -390,40 +151,33 @@ router.get('/queue/:id/briefing', async (req, res) => {
 router.post('/briefing/trigger', async (req, res) => {
   try {
     const queueId = req.body.queue_id || 'fee_cell';
-    const today = new Date().toISOString().slice(0, 10);
+    const today = dateKey();
 
-    // Gather yesterday's data (or use mock for demo)
-    const data = {
-      queue_name: queueId.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase()),
-      date: today,
-      total_served: 47,
-      avg_wait_actual: 12,
-      avg_wait_predicted: 11,
-      accuracy_percent: 84,
-      peak_hour: 14,
-      no_show_count: 5,
-      top_intents: ['fee_payment', 'bonafide_cert', 'tc_mc_request'],
-      surge_count: 2,
-      upcoming_calendar_events: ['Fee deadline today at 5pm'],
-    };
-
-    const briefing = await callGemini(briefingPrompt(data), mockBriefing);
-
-    // Save to Firestore
-    try {
-      await firestore.collection('queue_learning').doc(`${queueId}_${today}`).set({
-        queue_id: queueId,
-        date: today,
-        ai_briefing: briefing,
-        briefing_generated_at: new Date().toISOString(),
-      }, { merge: true });
-    } catch (e) {
-      // Non-critical
+    // Cell admins may only trigger briefings for cells they own.
+    const isSuper = req.user.role === 'super_admin' || (req.user.cells || []).includes('*');
+    if (!isSuper && !(req.user.cells || []).includes(queueId)) {
+      return res.status(403).json({ error: 'Access Denied', message: `You don't have access to ${queueId}.` });
     }
 
+    // Generate the briefing from real recorded service history for today.
+    await generateBriefingForQueue(queueId, today);
+
+    const doc = await firestore
+      .collection('queue_learning')
+      .doc(`${queueId}_${today}`)
+      .get();
+
+    if (!doc.exists || !doc.data().ai_briefing) {
+      return res.status(422).json({
+        error: 'No data',
+        message: 'No service history is available to generate a briefing yet.',
+      });
+    }
+
+    const saved = doc.data();
     return res.json({
-      ...briefing,
-      generated_at: new Date().toISOString(),
+      ...saved.ai_briefing,
+      generated_at: saved.briefing_generated_at || new Date().toISOString(),
       source: 'ai_generated',
     });
   } catch (err) {
@@ -439,6 +193,13 @@ router.post('/briefing/trigger', async (req, res) => {
 router.post('/queue/create', async (req, res) => {
   try {
     const { queue_id, name, type, counters_open } = req.body;
+
+    if (req.user.role !== 'super_admin' && !(req.user.cells || []).includes('*')) {
+      return res.status(403).json({
+        error: 'Forbidden',
+        message: 'Only super admins can create new queues.',
+      });
+    }
 
     if (!queue_id || !name) {
       return res.status(400).json({
@@ -457,18 +218,33 @@ router.post('/queue/create', async (req, res) => {
       counters_open: counters_open || 1,
       status: 'open',
       created_at: now,
-      admin_uid: 'admin',
+      admin_uid: req.user.username,
+      settings: {
+        auto_advance: false,
+        urgency_enabled: false,
+        auto_remove_ghosts: false,
+        auto_pause_on_surge: false,
+        limit_joins_on_surge: false,
+        ghost_grace_minutes: 15,
+        surge_multiplier: 2.5,
+        max_wait_minutes: 45,
+      },
     });
 
     // Initialize stats
     await db.ref(`queues/${queueId}/stats`).set({
       current_count: 0,
+      waiting_count: 0,
+      in_service_count: 0,
       avg_wait_live: 0,
       congestion_level: 'normal',
       joins_last_5min: 0,
+      served_last_5min: 0,
       surge_active: false,
       avg_service_time: 7,
       total_served: 0,
+      total_joined: 0,
+      token_seq: 0,
     });
 
     // Initialize counters
@@ -476,6 +252,8 @@ router.post('/queue/create', async (req, res) => {
     for (let i = 1; i <= numCounters; i++) {
       await db.ref(`queues/${queueId}/counters/counter_${i}`).set({
         label: `Counter ${i}`,
+        status: 'idle',
+        supported_types: [],
         current_user_id: null,
         service_started_at: null,
         expected_finish: null,
@@ -506,163 +284,77 @@ router.post('/queue/create', async (req, res) => {
 });
 
 /**
- * POST /admin/queue/:id/seed
- * Seed demo users for hackathon demo.
+ * POST /admin/queue/:id/call-next
+ * Call the next student to a counter (manual queue movement).
+ * Body: { counter_id, source? }
  */
-router.post('/queue/:id/seed', async (req, res) => {
-  try {
-    const queueId = req.params.id;
-    const io = req.app.get('io');
-    const now = Date.now();
-
-    // ── Ensure queue meta exists (create if missing) ──────────
-    const metaRef = db.ref(`queues/${queueId}/meta`);
-    const metaSnap = await metaRef.get();
-    if (!metaSnap.exists()) {
-      await metaRef.set({
-        name: queueId.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase()),
-        type: queueId,
-        counters_open: 1,
-        status: 'open',
-        created_at: now,
-        admin_uid: 'admin',
-      });
-      console.log(`📋 Auto-created queue meta for ${queueId}`);
-    }
-
-    // ── Ensure at least one counter exists ─────────────────────
-    const countersRef = db.ref(`queues/${queueId}/counters`);
-    const countersSnap = await countersRef.get();
-    if (!countersSnap.exists()) {
-      await db.ref(`queues/${queueId}/counters/counter_1`).set({
-        label: 'Counter 1',
-        current_user_id: null,
-        service_started_at: null,
-        expected_finish: null,
-        queue_length: 0,
-        auto_advance_timeout: null,
-      });
-      console.log(`📋 Auto-created counter_1 for ${queueId}`);
-    }
-
-    // ── Clear existing demo users to avoid duplicates ──────────
-    const existingUsersSnap = await db.ref(`queues/${queueId}/users`).get();
-    if (existingUsersSnap.exists()) {
-      const existing = existingUsersSnap.val();
-      for (const uid of Object.keys(existing)) {
-        if (uid.startsWith('demo_')) {
-          await db.ref(`queues/${queueId}/users/${uid}`).remove();
-        }
-      }
-    }
-
-    // Demo users from handoff doc
-    const demoUsers = [
-      {
-        name: 'Rahul Sharma', phone: '9876543210', token: 'Q-FEE-0001',
-        position: 1, intent_category: 'fee_payment', intent_details: 'Fee payment — deadline today',
-        urgency_score: 80, bail_probability: 12, sentiment_level: 1, priority: 'normal',
-        intent_urgency: 'critical', status: 'waiting',
-      },
-      {
-        name: 'Priya Mehta', phone: '9876543211', token: 'Q-FEE-0002',
-        position: 2, intent_category: 'bonafide_cert', intent_details: 'Bonafide certificate request',
-        urgency_score: 30, bail_probability: 8, sentiment_level: 1, priority: 'normal',
-        intent_urgency: 'medium', status: 'waiting',
-      },
-      {
-        name: 'Amit Singh', phone: '9876543212', token: 'Q-FEE-0003',
-        position: 3, intent_category: 'scholarship', intent_details: 'Scholarship application inquiry',
-        urgency_score: 60, bail_probability: 5, sentiment_level: 2, priority: 'elderly',
-        intent_urgency: 'high', status: 'waiting',
-      },
-      {
-        name: 'Sneha Rao', phone: '9876543213', token: 'Q-FEE-0004',
-        position: 4, intent_category: 'tc_mc_request', intent_details: 'TC/MC request for transfer',
-        urgency_score: 60, bail_probability: 71, sentiment_level: 3, priority: 'normal',
-        intent_urgency: 'high', status: 'waiting',
-      },
-      {
-        name: 'Vikram Nair', phone: '9876543214', token: 'Q-FEE-0005',
-        position: 5, intent_category: 'exam_query', intent_details: 'Exam result query',
-        urgency_score: 10, bail_probability: 22, sentiment_level: 1, priority: 'normal',
-        intent_urgency: 'low', status: 'waiting',
-      },
-    ];
-
-    for (const user of demoUsers) {
-      const userId = `demo_${user.name.toLowerCase().replace(/\s/g, '_')}`;
-      await db.ref(`queues/${queueId}/users/${userId}`).set({
-        ...user,
-        join_time: now - (user.position * 2 * 60 * 1000), // Stagger join times
-        last_active: now, // Set to now so Ghost Buster doesn't immediately flag them
-        wait_predicted: 12,
-        wait_confidence: 87,
-        counter_id: 'counter_1',
-        gps_lat: null,
-        gps_lng: null,
-        last_flash_sent: 0,
-        history_noshows: 0,
-        visit_reason: user.intent_details,
-      });
-    }
-
-    // Update stats
-    await db.ref(`queues/${queueId}/stats`).update({
-      current_count: demoUsers.length,
-      avg_wait_live: 12,
-      congestion_level: 'normal',
-      joins_last_5min: 0,
-      surge_active: false,
-      avg_service_time: 7,
-      total_served: 0,
-    });
-
-    // ── Auto-advance: call the first user immediately ─────────
-    // Reset counter so advanceQueue picks up the idle counter
-    await db.ref(`queues/${queueId}/counters/counter_1`).update({
-      current_user_id: null,
-      auto_advance_timeout: null,
-    });
-    const advanceResult = await advanceQueue(queueId, 'counter_1', 'seed', io);
-
-    if (io) {
-      io.to(`queue_${queueId}`).emit('queue_update', {
-        action: 'queue_seeded',
-        count: demoUsers.length,
-      });
-    }
-
-    console.log(`🌱 Seeded ${demoUsers.length} demo users in ${queueId}`);
-
-    return res.json({
-      seeded: true,
-      first_called: advanceResult.called_user ? advanceResult.called_user.name : null,
-      users: demoUsers.map(u => ({ name: u.name, position: u.position, intent: u.intent_category })),
-    });
-  } catch (err) {
-    console.error('❌ Seed error:', err);
-    return res.status(500).json({ error: 'Internal server error', message: err.message });
-  }
-});
-
-/**
- * POST /admin/queue/:id/next (Internal Auto-Advance)
- * AI auto-advance system calls next user. Called INTERNALLY by the system.
- * Not intended for admin use — admin only clicks Attended/Removed.
- */
-router.post('/queue/:id/next', async (req, res) => {
+router.post('/queue/:id/call-next', async (req, res) => {
   try {
     const queueId = req.params.id;
     const { counter_id, source } = req.body;
     const io = req.app.get('io');
     const counterId = counter_id || 'counter_1';
 
-    const result = await advanceQueue(queueId, counterId, source || 'auto_advance', io);
+    const result = await queueService.callNext(queueId, counterId, io, source || 'admin_manual');
+    if (!result.ok) {
+      const messages = {
+        unknown_counter: 'That counter does not exist.',
+        counter_in_service: 'That counter is currently serving a student.',
+        counter_busy: 'That counter already has a student called.',
+        empty: 'No students are waiting.',
+      };
+      return res.status(409).json({ error: result.reason, message: messages[result.reason] || 'Unable to call next.' });
+    }
+    return res.json(result);
+  } catch (err) {
+    console.error('❌ Call-next error:', err);
+    return res.status(500).json({ error: 'Internal server error', message: err.message });
+  }
+});
 
+/** Internal auto-advance (kept for tooling/tests). */
+router.post('/queue/:id/next', async (req, res) => {
+  try {
+    const queueId = req.params.id;
+    const { counter_id, source } = req.body;
+    const io = req.app.get('io');
+    const counterId = counter_id || 'counter_1';
+    const result = await queueService.callNext(queueId, counterId, io, source || 'auto_advance');
     return res.json(result);
   } catch (err) {
     console.error('❌ Auto-advance error:', err);
+    return res.status(500).json({ error: 'Internal server error', message: err.message });
+  }
+});
+
+/**
+ * GET /admin/queue/:id/settings  — read queue settings
+ * POST /admin/queue/:id/settings — update queue settings / crowd automation toggles
+ */
+router.get('/queue/:id/settings', async (req, res) => {
+  try {
+    const queueId = req.params.id;
+    const snap = await db.ref(`queues/${queueId}/meta/settings`).get();
+    return res.json({ settings: queueService.getSettings({ settings: snap.exists() ? snap.val() : {} }) });
+  } catch (err) {
+    return res.status(500).json({ error: 'Internal server error', message: err.message });
+  }
+});
+
+router.post('/queue/:id/settings', async (req, res) => {
+  try {
+    const queueId = req.params.id;
+    const io = req.app.get('io');
+    const body = req.body || {};
+    const allowed = ['auto_advance', 'urgency_enabled', 'auto_remove_ghosts', 'auto_pause_on_surge', 'limit_joins_on_surge'];
+    const numeric = ['ghost_grace_minutes', 'surge_multiplier', 'max_wait_minutes'];
+    const patch = {};
+    for (const k of allowed) if (k in body) patch[k] = body[k] === true;
+    for (const k of numeric) if (Number.isFinite(body[k])) patch[k] = body[k];
+    const merged = await queueService.updateSettings(queueId, patch, io);
+    return res.json({ settings: queueService.getSettings({ settings: merged }) });
+  } catch (err) {
+    console.error('❌ Settings update error:', err);
     return res.status(500).json({ error: 'Internal server error', message: err.message });
   }
 });
@@ -675,15 +367,7 @@ router.post('/queue/:id/pause', async (req, res) => {
   try {
     const queueId = req.params.id;
     const io = req.app.get('io');
-
-    await db.ref(`queues/${queueId}/meta`).update({ status: 'paused' });
-
-    if (io) {
-      io.to(`queue_${queueId}`).emit('queue_update', { action: 'queue_paused' });
-      io.to(`admin_${queueId}`).emit('queue_paused', { queue_id: queueId });
-    }
-
-    console.log(`⏸️  Queue paused: ${queueId}`);
+    await queueService.setQueueStatus(queueId, 'paused', io);
     return res.json({ status: 'paused', queue_id: queueId });
   } catch (err) {
     console.error('❌ Pause error:', err);
@@ -699,18 +383,26 @@ router.post('/queue/:id/resume', async (req, res) => {
   try {
     const queueId = req.params.id;
     const io = req.app.get('io');
-
-    await db.ref(`queues/${queueId}/meta`).update({ status: 'open' });
-
-    if (io) {
-      io.to(`queue_${queueId}`).emit('queue_update', { action: 'queue_resumed' });
-      io.to(`admin_${queueId}`).emit('queue_resumed', { queue_id: queueId });
-    }
-
-    console.log(`▶️  Queue resumed: ${queueId}`);
+    await queueService.setQueueStatus(queueId, 'open', io);
     return res.json({ status: 'open', queue_id: queueId });
   } catch (err) {
     console.error('❌ Resume error:', err);
+    return res.status(500).json({ error: 'Internal server error', message: err.message });
+  }
+});
+
+/**
+ * POST /admin/queue/:id/close
+ * Close a queue entirely — no new joins accepted.
+ */
+router.post('/queue/:id/close', async (req, res) => {
+  try {
+    const queueId = req.params.id;
+    const io = req.app.get('io');
+    await queueService.setQueueStatus(queueId, 'closed', io);
+    return res.json({ status: 'closed', queue_id: queueId });
+  } catch (err) {
+    console.error('❌ Close error:', err);
     return res.status(500).json({ error: 'Internal server error', message: err.message });
   }
 });
@@ -756,136 +448,46 @@ router.post('/queue/:id/requirements', async (req, res) => {
 });
 
 /**
- * Send SMS when a user is removed.
- * Wrapped in try-catch — SMS failure must NOT break queue flow.
- */
-function sendRemovalSMS(user, queueId) {
-  try {
-    const accountSid = process.env.TWILIO_ACCOUNT_SID;
-    const authToken = process.env.TWILIO_AUTH_TOKEN;
-    const fromPhone = process.env.TWILIO_PHONE_NUMBER;
-
-    if (!accountSid || !authToken || !fromPhone || accountSid === 'your-account-sid') {
-      return;
-    }
-
-    const twilio = require('twilio');
-    const client = twilio(accountSid, authToken);
-
-    client.messages.create({
-      body: `You were removed from the queue. Please rejoin if needed.`,
-      from: fromPhone,
-      to: `+91${user.phone}`,
-    }).catch(() => {});
-  } catch (err) {
-    // Silent fail — non-critical
-  }
-}
-
-/**
  * POST /admin/queue/:id/counters
  * Add or remove a counter dynamically.
- * Body: { action: 'add' | 'remove' }
+ * Body: { action: 'add' | 'remove', counter_id?, label?, supported_types? }
  */
 router.post('/queue/:id/counters', async (req, res) => {
   try {
     const queueId = req.params.id;
-    const { action } = req.body;
+    const { action, counter_id, label, supported_types } = req.body;
     const io = req.app.get('io');
 
-    if (!['add', 'remove'].includes(action)) {
-      return res.status(400).json({
-        error: 'Validation failed',
-        message: "action must be 'add' or 'remove'.",
-      });
+    if (!['add', 'remove', 'update'].includes(action)) {
+      return res.status(400).json({ error: 'Validation failed', message: "action must be 'add', 'remove', or 'update'." });
     }
-
-    const metaRef = db.ref(`queues/${queueId}/meta`);
-    const metaSnap = await metaRef.get();
-    const meta = metaSnap.exists() ? metaSnap.val() : { counters_open: 1 };
-    const currentCount = meta.counters_open || 1;
 
     if (action === 'add') {
-      const newCount = currentCount + 1;
-      const newCounterId = `counter_${newCount}`;
-
-      // Create the new counter entry
-      await db.ref(`queues/${queueId}/counters/${newCounterId}`).set({
-        label: `Counter ${newCount}`,
-        current_user_id: null,
-        service_started_at: null,
-        expected_finish: null,
-        queue_length: 0,
-        auto_advance_timeout: null,
-      });
-
-      await metaRef.update({ counters_open: newCount });
-
-      if (io) {
-        io.to(`admin_${queueId}`).emit('queue_update', {
-          action: 'counter_added',
-          counters_open: newCount,
-        });
-        io.to(`queue_${queueId}`).emit('queue_update', {
-          action: 'counter_added',
-          counters_open: newCount,
-        });
-      }
-
-      console.log(`➕ Counter added: ${newCounterId} in ${queueId} (total: ${newCount})`);
-
-      return res.json({
-        counters_open: newCount,
-        added: newCounterId,
-        action: 'add',
-      });
-    } else {
-      // Remove — minimum 1 counter
-      if (currentCount <= 1) {
-        return res.status(400).json({
-          error: 'Cannot remove',
-          message: 'At least 1 counter must remain open.',
-        });
-      }
-
-      const removeCounterId = `counter_${currentCount}`;
-      const newCount = currentCount - 1;
-
-      // Check if counter is currently serving someone
-      const counterSnap = await db.ref(`queues/${queueId}/counters/${removeCounterId}`).get();
-      if (counterSnap.exists()) {
-        const counter = counterSnap.val();
-        if (counter.current_user_id) {
-          return res.status(400).json({
-            error: 'Counter busy',
-            message: `${removeCounterId} is currently serving a student. Complete service first.`,
-          });
-        }
-      }
-
-      // Remove counter entry
-      await db.ref(`queues/${queueId}/counters/${removeCounterId}`).remove();
-      await metaRef.update({ counters_open: newCount });
-
-      if (io) {
-        io.to(`admin_${queueId}`).emit('queue_update', {
-          action: 'counter_removed',
-          counters_open: newCount,
-        });
-        io.to(`queue_${queueId}`).emit('queue_update', {
-          action: 'counter_removed',
-          counters_open: newCount,
-        });
-      }
-
-      console.log(`➖ Counter removed: ${removeCounterId} in ${queueId} (total: ${newCount})`);
-
-      return res.json({
-        counters_open: newCount,
-        removed: removeCounterId,
-        action: 'remove',
-      });
+      const r = await queueService.addCounter(queueId, io, { label, supported_types });
+      if (!r.ok) return res.status(400).json({ error: r.reason });
+      return res.json({ action: 'add', added: r.counter_id });
     }
+
+    if (action === 'update') {
+      if (!counter_id) return res.status(400).json({ error: 'counter_id is required for update' });
+      const patch = {};
+      if (typeof label === 'string') patch.label = label.trim().slice(0, 40);
+      if (Array.isArray(supported_types)) patch.supported_types = supported_types.map(s => String(s).trim().toLowerCase()).filter(Boolean);
+      await db.ref(`queues/${queueId}/counters/${counter_id}`).update(patch);
+      if (io) io.to(`admin_${queueId}`).emit('queue_update', { action: 'counter_updated', counter_id });
+      return res.json({ action: 'update', counter_id, ...patch });
+    }
+
+    // remove
+    if (!counter_id) return res.status(400).json({ error: 'counter_id is required for remove' });
+    const r = await queueService.removeCounter(queueId, counter_id, io);
+    if (!r.ok) {
+      const msg = r.reason === 'last_counter'
+        ? 'At least one counter must remain open.'
+        : r.reason === 'counter_busy' ? 'Counter is currently serving a student.' : r.reason;
+      return res.status(400).json({ error: 'Cannot remove', message: msg });
+    }
+    return res.json({ action: 'remove', removed: counter_id, counters_open: r.counters_open });
   } catch (err) {
     console.error('❌ Counter update error:', err);
     return res.status(500).json({ error: 'Internal server error', message: err.message });
@@ -893,14 +495,29 @@ router.post('/queue/:id/counters', async (req, res) => {
 });
 
 /**
- * GET /admin/queue/:id/analytics
+ * GET /admin/queue/:id/analytics?range=today|week|month
  * Returns real analytics data: total served, no-show rate, hourly traffic,
  * wait time accuracy (predicted vs actual), intent breakdown, and efficiency score.
+ * Supports historical ranges via the `range` query parameter.
  */
 router.get('/queue/:id/analytics', async (req, res) => {
   try {
     const queueId = req.params.id;
-    const today = new Date().toISOString().slice(0, 10);
+    const range = req.query.range || 'today'; // today | week | month
+    const today = dateKey();
+    const dayNames = ['SUN', 'MON', 'TUE', 'WED', 'THU', 'FRI', 'SAT'];
+    const monthNames = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+
+    // Compute date range based on range param
+    let lookbackDays = 1;
+    let rangeLabel = 'Today';
+    if (range === 'week') { lookbackDays = 7; rangeLabel = 'This Week'; }
+    else if (range === 'month') { lookbackDays = 30; rangeLabel = 'This Month'; }
+
+    const rangeStart = new Date();
+    rangeStart.setDate(rangeStart.getDate() - lookbackDays + 1);
+    rangeStart.setHours(0, 0, 0, 0);
+    const rangeStartStr = dateKey(rangeStart);
 
     // ── 1. Fetch RT DB stats ──────────────────────────────────────
     const statsSnap = await db.ref(`queues/${queueId}/stats`).get();
@@ -912,7 +529,6 @@ router.get('/queue/:id/analytics', async (req, res) => {
     let waitingCount = 0;
     let calledCount = 0;
     const intentCounts = {};
-    const activeUsers = [];
 
     if (usersSnap.exists()) {
       const usersObj = usersSnap.val();
@@ -921,70 +537,71 @@ router.get('/queue/:id/analytics', async (req, res) => {
           activeCount++;
           if (u.status === 'waiting') waitingCount++;
           if (u.status === 'called' || u.status === 'in_service') calledCount++;
-          activeUsers.push(u);
         }
-        // Count intents across ALL users (including served/removed) for breakdown
         if (u.intent_category) {
           intentCounts[u.intent_category] = (intentCounts[u.intent_category] || 0) + 1;
         }
       }
     }
 
-    // ── 3. Fetch service_history from Firestore (last 7 days) ─────
-    const sevenDaysAgo = new Date();
-    sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
-    const sevenDaysAgoStr = sevenDaysAgo.toISOString().slice(0, 10);
+    // ── 3. Fetch service_history from Firestore ───────────────────
+    // Always fetch broader range for chart data (max 30 days)
+    const broadRangeStart = new Date();
+    broadRangeStart.setDate(broadRangeStart.getDate() - 30);
+    const broadRangeStr = dateKey(broadRangeStart);
 
     let serviceRecords = [];
     try {
       const historySnap = await firestore.collection('service_history')
         .where('queue_id', '==', queueId)
-        .where('date_key', '>=', sevenDaysAgoStr)
+        .where('date_key', '>=', broadRangeStr)
         .orderBy('date_key', 'desc')
-        .limit(500)
+        .limit(2000)
         .get();
-
       serviceRecords = historySnap.docs.map(doc => doc.data());
     } catch (e) {
-      // Firestore might not have the index — fall back gracefully
       try {
         const historySnap = await firestore.collection('service_history')
           .where('queue_id', '==', queueId)
-          .limit(200)
+          .limit(500)
           .get();
         serviceRecords = historySnap.docs.map(doc => doc.data());
       } catch (e2) {
-        // Completely unavailable — use empty
+        // Completely unavailable
       }
     }
 
-    // ── 4. Compute total served + removed today ───────────────────
-    const todayRecords = serviceRecords.filter(r => r.date_key === today);
-    const totalServedToday = todayRecords.filter(r => r.attended_or_removed === 'attended').length;
-    const totalRemovedToday = todayRecords.filter(r => r.attended_or_removed === 'removed').length;
-    const noShowRate = (totalServedToday + totalRemovedToday) > 0
-      ? Math.round((totalRemovedToday / (totalServedToday + totalRemovedToday)) * 100)
+    // Filter records to the selected range
+    const rangeRecords = serviceRecords.filter(r => r.date_key && r.date_key >= rangeStartStr);
+
+    // ── 4. Compute total served + removed in selected range ───────
+    const totalServedRange = rangeRecords.filter(r => r.attended_or_removed === 'attended').length;
+    const totalRemovedRange = rangeRecords.filter(r => r.attended_or_removed === 'removed').length;
+    const totalRange = totalServedRange + totalRemovedRange;
+    const noShowRate = totalRange > 0
+      ? Math.round((totalRemovedRange / totalRange) * 100)
       : 0;
 
-    // Also count from stats.total_served if no firestore records yet
-    const totalServedFallback = stats.total_served || 0;
-    const totalServedDisplay = totalServedToday > 0 ? totalServedToday : totalServedFallback;
+    // Fallback for today view if no firestore records yet
+    const totalServedFallback = range === 'today' ? (stats.total_served || 0) : 0;
+    const totalServedDisplay = totalServedRange > 0 ? totalServedRange : totalServedFallback;
 
-    // ── 5. Hourly traffic heatmap (today) ─────────────────────────
+    // ── 5. Hourly traffic heatmap ─────────────────────────────────
+    // For today: show today's hours. For week/month: aggregate all hours.
     const hourlyTraffic = {};
     for (let h = 8; h <= 20; h++) hourlyTraffic[h] = 0;
 
-    todayRecords.forEach(r => {
+    rangeRecords.forEach(r => {
       const hour = r.hour_key;
       if (hour !== undefined) hourlyTraffic[hour] = (hourlyTraffic[hour] || 0) + 1;
     });
 
-    // Also count active user join times for today's traffic
-    if (usersSnap.exists()) {
+    // Also count active user join times for today's traffic (only for today view)
+    if (range === 'today' && usersSnap.exists()) {
       for (const u of Object.values(usersSnap.val())) {
         if (u.join_time) {
           const joinDate = new Date(u.join_time);
-          if (joinDate.toISOString().slice(0, 10) === today) {
+          if (dateKey(joinDate) === today) {
             const h = joinDate.getHours();
             hourlyTraffic[h] = (hourlyTraffic[h] || 0) + 1;
           }
@@ -1003,27 +620,44 @@ router.get('/queue/:id/analytics', async (req, res) => {
       .filter(h => h.hour >= 8 && h.hour <= 18)
       .sort((a, b) => a.hour - b.hour);
 
-    // ── 6. Wait time accuracy — daily predicted vs actual (last 7 days) ─
-    const dailyAccuracy = {};
-    const dayNames = ['SUN', 'MON', 'TUE', 'WED', 'THU', 'FRI', 'SAT'];
+    // ── 6. Wait time accuracy chart ───────────────────────────────
+    // For 'today': show hourly breakdown
+    // For 'week': show daily breakdown (7 days)
+    // For 'month': show daily breakdown (30 days)
+    const accuracyBuckets = {};
 
-    serviceRecords.forEach(r => {
-      if (r.date_key && r.wait_actual !== undefined) {
-        if (!dailyAccuracy[r.date_key]) {
-          dailyAccuracy[r.date_key] = { predicted: [], actual: [] };
+    if (range === 'today') {
+      // Group by hour for today
+      const todayRecords = serviceRecords.filter(r => r.date_key === today);
+      todayRecords.forEach(r => {
+        if (r.wait_actual !== undefined) {
+          const hour = r.hour_key || 12;
+          const hourLabel = `${hour > 12 ? hour - 12 : hour}${hour >= 12 ? 'PM' : 'AM'}`;
+          if (!accuracyBuckets[hour]) accuracyBuckets[hour] = { label: hourLabel, predicted: [], actual: [] };
+          accuracyBuckets[hour].actual.push(r.wait_actual);
+          if (r.wait_predicted !== undefined) accuracyBuckets[hour].predicted.push(r.wait_predicted);
         }
-        dailyAccuracy[r.date_key].actual.push(r.wait_actual);
-        if (r.wait_predicted !== undefined) {
-          dailyAccuracy[r.date_key].predicted.push(r.wait_predicted);
+      });
+    } else {
+      // Group by date for week/month
+      rangeRecords.forEach(r => {
+        if (r.date_key && r.wait_actual !== undefined) {
+          if (!accuracyBuckets[r.date_key]) {
+            const d = parseDateKey(r.date_key);
+            const label = range === 'week'
+              ? dayNames[d.getDay()]
+              : `${d.getDate()} ${monthNames[d.getMonth()]}`;
+            accuracyBuckets[r.date_key] = { label, predicted: [], actual: [] };
+          }
+          accuracyBuckets[r.date_key].actual.push(r.wait_actual);
+          if (r.wait_predicted !== undefined) accuracyBuckets[r.date_key].predicted.push(r.wait_predicted);
         }
-      }
-    });
+      });
+    }
 
-    const accuracyData = Object.entries(dailyAccuracy)
+    const accuracyData = Object.entries(accuracyBuckets)
       .sort(([a], [b]) => a.localeCompare(b))
-      .slice(-7)
-      .map(([dateKey, vals]) => {
-        const d = new Date(dateKey);
+      .map(([key, vals]) => {
         const avgPredicted = vals.predicted.length > 0
           ? Math.round(vals.predicted.reduce((s, v) => s + v, 0) / vals.predicted.length)
           : 0;
@@ -1031,8 +665,8 @@ router.get('/queue/:id/analytics', async (req, res) => {
           ? Math.round(vals.actual.reduce((s, v) => s + v, 0) / vals.actual.length)
           : 0;
         return {
-          day: dayNames[d.getDay()] || dateKey.slice(5),
-          date: dateKey,
+          day: vals.label,
+          date: key,
           predicted: avgPredicted,
           actual: avgActual,
           count: vals.actual.length,
@@ -1040,32 +674,29 @@ router.get('/queue/:id/analytics', async (req, res) => {
       });
 
     // ── 7. Efficiency score ───────────────────────────────────────
-    // Based on: low wait times, low no-show rate, high throughput
     let totalPredictionError = 0;
     let predictionCount = 0;
-    serviceRecords.forEach(r => {
+    rangeRecords.forEach(r => {
       if (r.prediction_error !== undefined) {
         totalPredictionError += r.prediction_error;
         predictionCount++;
       }
     });
     const avgPredictionError = predictionCount > 0 ? totalPredictionError / predictionCount : 5;
-    const predictionAccuracy = Math.max(0, 100 - (avgPredictionError * 5)); // 5 points per minute error
+    const predictionAccuracy = Math.max(0, 100 - (avgPredictionError * 5));
     const noShowPenalty = noShowRate * 0.5;
     const efficiencyScore = Math.round(Math.max(0, Math.min(100,
       (predictionAccuracy * 0.6) + ((100 - noShowPenalty) * 0.4)
     )));
 
-    // ── 8. Intent breakdown for analytics ─────────────────────────
-    // Also count from service history for served intent distribution
+    // ── 8. Intent breakdown ───────────────────────────────────────
     const servedIntents = {};
-    serviceRecords.forEach(r => {
+    rangeRecords.forEach(r => {
       if (r.intent_category) {
         servedIntents[r.intent_category] = (servedIntents[r.intent_category] || 0) + 1;
       }
     });
 
-    // Merge active + served intents
     const allIntents = { ...servedIntents };
     for (const [k, v] of Object.entries(intentCounts)) {
       allIntents[k] = (allIntents[k] || 0) + v;
@@ -1082,11 +713,37 @@ router.get('/queue/:id/analytics', async (req, res) => {
       if (count > peakCount) { peakCount = count; peakHour = parseInt(h); }
     }
 
+    // ── 10. Daily served trend (for week/month sparkline) ─────────
+    const dailyServedTrend = [];
+    if (range !== 'today') {
+      const dailyCounts = {};
+      rangeRecords.forEach(r => {
+        if (r.date_key && r.attended_or_removed === 'attended') {
+          dailyCounts[r.date_key] = (dailyCounts[r.date_key] || 0) + 1;
+        }
+      });
+      // Fill in zeros for days with no data
+      for (let d = new Date(rangeStart); d <= new Date(); d.setDate(d.getDate() + 1)) {
+        const dk = dateKey(d);
+        const dateObj = parseDateKey(dk);
+        dailyServedTrend.push({
+          date: dk,
+          label: range === 'week'
+            ? dayNames[dateObj.getDay()]
+            : `${dateObj.getDate()} ${monthNames[dateObj.getMonth()]}`,
+          served: dailyCounts[dk] || 0,
+        });
+      }
+    }
+
     return res.json({
       queue_id: queueId,
       date: today,
+      range,
+      range_label: rangeLabel,
+      range_start: rangeStartStr,
       total_served_today: totalServedDisplay,
-      total_removed_today: totalRemovedToday,
+      total_removed_today: totalRemovedRange,
       no_show_rate: noShowRate,
       active_in_queue: activeCount,
       waiting_count: waitingCount,
@@ -1098,6 +755,7 @@ router.get('/queue/:id/analytics', async (req, res) => {
       heatmap_data: heatmapData,
       accuracy_data: accuracyData,
       intent_breakdown: intentBreakdown,
+      daily_served_trend: dailyServedTrend,
       peak_hour: peakHour,
       peak_hour_label: peakHour !== null
         ? `${peakHour > 12 ? peakHour - 12 : peakHour}:00 ${peakHour >= 12 ? 'PM' : 'AM'}`

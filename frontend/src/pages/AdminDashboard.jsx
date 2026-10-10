@@ -1,27 +1,27 @@
-import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
+import { useState, useEffect, useCallback, useMemo } from 'react';
+import { motion } from 'framer-motion';
 import { auth, googleProvider, signInWithPopup, signOut } from '../firebase/config';
 import { onAuthStateChanged } from 'firebase/auth';
 import { useSocket } from '../hooks/useSocket';
-import { getQueueUsers, getQueueStatus, getBriefing, markAttended, markRemoved, markDone, pauseQueue, resumeQueue, seedQueue, callNextUser, getAnalytics, updateCounters } from '../utils/api';
-import { speakAdmin } from '../utils/tts';
+import { 
+  getQueueUsers, getQueueStatus, getBriefing, markAttended, markRemoved, markDone,
+  pauseQueue, resumeQueue, callNextUser, getAnalytics,
+  updateCounters, loginAdmin, listQueues, registerAdmin, createQueue, getMe 
+} from '../utils/api';
 import IntentBadge from '../components/IntentBadge';
 import QRModal from '../components/QRModal';
 import RequirementsManager from '../components/RequirementsManager';
 
-function createQueueId(name) { return name.trim().toLowerCase().replace(/\s+/g, '_'); }
 function getQueueName(id) { return id.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase()); }
 
 export default function AdminDashboard() {
-  const [availableQueues] = useState([
-    { id: 'fee_cell', name: 'Fee Cell' },
-    { id: 'admin_cell', name: 'Admin Cell' },
-    { id: 'admission_cell', name: 'Admission Cell' },
-  ]);
+  const [availableQueues, setAvailableQueues] = useState([]);
   const [activeQueueId, setActiveQueueId] = useState('fee_cell');
   const [showQRModal, setShowQRModal] = useState(false);
   const [showReqs, setShowReqs] = useState(false);
+  const [docPreview, setDocPreview] = useState(null);
   const [sidebarOpen, setSidebarOpen] = useState(false);
-  const [currentView, setCurrentView] = useState('dashboard'); // 'dashboard' | 'analytics'
+  const [currentView, setCurrentView] = useState('dashboard'); // 'dashboard' | 'queue' | 'analytics' | 'system_control'
 
   // Auth
   const [user, setUser] = useState(null);
@@ -29,26 +29,137 @@ export default function AdminDashboard() {
   const [authError, setAuthError] = useState(null);
   const [idToken, setIdToken] = useState(null);
 
+  // JWT Auth login forms
+  const [usernameInput, setUsernameInput] = useState('');
+  const [passwordInput, setPasswordInput] = useState('');
+  const [loginLoading, setLoginLoading] = useState(false);
+
+  // Load Queues list
+  const loadQueuesList = useCallback(async () => {
+    try {
+      const res = await listQueues();
+      if (res && res.queues) {
+        setAvailableQueues(res.queues);
+      }
+    } catch (e) {
+      console.error('Error loading queues:', e);
+      setAvailableQueues([
+        { id: 'fee_cell', name: 'Fee Cell' },
+        { id: 'admin_cell', name: 'Admin Cell' },
+        { id: 'admission_cell', name: 'Admission Cell' },
+      ]);
+    }
+  }, []);
+
   useEffect(() => {
+    loadQueuesList();
+  }, [loadQueuesList]);
+
+  // Auth Initialization
+  useEffect(() => {
+    // Check local storage for JWT token first
+    const storedToken = localStorage.getItem('adminToken') || sessionStorage.getItem('adminToken');
+    const storedUser = localStorage.getItem('adminUser') || sessionStorage.getItem('adminUser');
+    
+    if (storedToken && storedUser) {
+      try {
+        setIdToken(storedToken);
+        setUser(JSON.parse(storedUser));
+        setAuthLoading(false);
+        return;
+      } catch (e) {
+        localStorage.removeItem('adminToken');
+        localStorage.removeItem('adminUser');
+      }
+    }
+
+    // If Firebase client auth isn't configured, username/password login still works.
+    if (!auth) { setAuthLoading(false); return; }
+
     const unsub = onAuthStateChanged(auth, async (u) => {
       if (u) {
         try {
           const t = await u.getIdToken();
-          setIdToken(t); setUser(u);
-        } catch { setUser(null); setIdToken(null); }
-      } else { setUser(null); setIdToken(null); }
+          // The backend only accepts Firebase identities that are linked to an
+          // existing admin account — validate before entering the dashboard.
+          const me = await getMe(t);
+          setIdToken(t);
+          setUser(me.user);
+        } catch {
+          setAuthError('This Google account is not linked to an admin. Please use username/password sign-in.');
+          try { await signOut(auth); } catch { /* ignore */ }
+          setUser(null);
+          setIdToken(null);
+        }
+      } else {
+        setUser(null);
+        setIdToken(null);
+      }
       setAuthLoading(false);
     });
     return () => unsub();
   }, []);
 
+  // Filter queues based on role and cells
+  const filteredQueues = useMemo(() => {
+    if (!user) return [];
+    if (user.role === 'super_admin' || (user.cells && user.cells.includes('*'))) {
+      return availableQueues;
+    }
+    return availableQueues.filter(q => user.cells && user.cells.includes(q.id));
+  }, [user, availableQueues]);
+
+  // Reset active queue if not permitted
+  useEffect(() => {
+    if (filteredQueues.length > 0) {
+      if (!filteredQueues.find(q => q.id === activeQueueId)) {
+        setActiveQueueId(filteredQueues[0].id);
+      }
+    }
+  }, [filteredQueues, activeQueueId]);
+
   const handleSignIn = async () => {
-    try { setAuthError(null); await signInWithPopup(auth, googleProvider); }
-    catch (err) { setAuthError(`Sign in failed: ${err.code || err.message}`); }
+    if (!auth) {
+      setAuthError('Google sign-in is not configured. Please use username and password.');
+      return;
+    }
+    try {
+      setAuthError(null);
+      await signInWithPopup(auth, googleProvider);
+    } catch (err) {
+      setAuthError(`Sign in failed: ${err.code || err.message}`);
+    }
   };
+
+  const handleJWTLogin = async (e) => {
+    if (e) e.preventDefault();
+    setLoginLoading(true);
+    setAuthError(null);
+    try {
+      const data = await loginAdmin(usernameInput, passwordInput);
+      setIdToken(data.token);
+      setUser(data.user);
+      localStorage.setItem('adminToken', data.token);
+      localStorage.setItem('adminUser', JSON.stringify(data.user));
+    } catch (err) {
+      setAuthError(err.message || 'Login failed. Check username and password.');
+    } finally {
+      setLoginLoading(false);
+    }
+  };
+
   const handleSignOut = async () => {
-    if (idToken === 'hackathon-bypass-token') { setUser(null); setIdToken(null); return; }
-    await signOut(auth);
+    localStorage.removeItem('adminToken');
+    localStorage.removeItem('adminUser');
+    sessionStorage.removeItem('adminToken');
+    sessionStorage.removeItem('adminUser');
+    try {
+      await signOut(auth);
+    } catch (e) {
+      console.error(e);
+    }
+    setUser(null);
+    setIdToken(null);
   };
 
   // Data
@@ -65,7 +176,7 @@ export default function AdminDashboard() {
       if (!activeQueueId) return;
       const [status, usersRes] = await Promise.all([
         getQueueStatus(activeQueueId),
-        getQueueUsers(activeQueueId),
+        getQueueUsers(activeQueueId, idToken),
       ]);
       setQueueStatus(status);
       setUsers(usersRes?.users || []);
@@ -90,7 +201,7 @@ export default function AdminDashboard() {
 
   const socketHandlers = useMemo(() => ({
     queue_update: () => fetchAll(),
-    user_called: (d) => { addNotif('call', `${d.name} called to ${d.counter}`); speakAdmin(d.token, d.counter); fetchAll(); },
+    user_called: (d) => { addNotif('call', `${d.name} called to ${d.counter}`); fetchAll(); },
     service_completed: (d) => { addNotif('done', `${d.name} served — ${d.actual_wait}min`); fetchAll(); },
     user_removed: (d) => { addNotif('remove', `${d.name} removed`); fetchAll(); },
     user_attended: () => fetchAll(),
@@ -103,13 +214,21 @@ export default function AdminDashboard() {
 
   // Actions
   const doAction = async (fn, ...args) => {
-    const uid = args[0];
-    setActionLoading(uid);
-    try { await fn(...args); await fetchAll(); } catch (e) { console.error(e); }
-    finally { setActionLoading(null); }
+    // If the action is markAttended, markRemoved, or markDone, the userId is args[1]
+    const isUserAction = ['markAttended', 'markRemoved', 'markDone'].includes(fn.name);
+    const loadingKey = isUserAction ? args[1] : 'global';
+    setActionLoading(loadingKey);
+    try {
+      await fn(...args);
+    } catch (e) {
+      console.error('Action error:', e);
+      alert(e.message || 'Action failed');
+    } finally {
+      setActionLoading(null);
+      await fetchAll();
+    }
   };
 
-  const handleCall = () => doAction(callNextUser, activeQueueId, idToken);
   const handleAttended = (uid) => doAction(markAttended, activeQueueId, uid, idToken);
   const handleRemoved = (uid) => doAction(markRemoved, activeQueueId, uid, idToken);
   const handleDone = (uid) => doAction(markDone, activeQueueId, uid, idToken);
@@ -122,26 +241,54 @@ export default function AdminDashboard() {
   };
 
   // Derived
-  const serving = useMemo(() => users.find(u => u.status === 'called' || u.status === 'in_service'), [users]);
   const waiting = useMemo(() => users.filter(u => u.status === 'waiting').sort((a, b) => (a.position || 999) - (b.position || 999)), [users]);
 
   // Auth gate
   if (authLoading) return (
     <div className="min-h-screen flex items-center justify-center bg-surface">
-      <div className="text-center"><div className="w-10 h-10 border-3 border-primary border-t-transparent rounded-full animate-spin mx-auto" /><p className="mt-4 text-on-surface-variant text-sm">Loading...</p></div>
+      <div className="text-center"><div className="w-10 h-10 border-4 border-primary/20 border-t-primary rounded-full animate-spin mx-auto" /><p className="mt-4 text-on-surface-variant text-sm">Loading…</p></div>
     </div>
   );
 
   if (!user) return (
-    <div className="min-h-screen flex items-center justify-center bg-surface">
-      <div className="card max-w-sm w-full text-center">
-        <div className="w-14 h-14 rounded-2xl bg-primary flex items-center justify-center mx-auto mb-6"><span className="text-white font-bold text-lg">🏛</span></div>
-        <h1 className="text-2xl font-bold text-on-surface mb-2">Academic Curator</h1>
-        <p className="text-on-surface-variant text-sm mb-8">Admin access required</p>
-        {authError && <div className="bg-danger-light text-danger-dark text-sm p-3 rounded-btn mb-4">{authError}</div>}
-        <button onClick={handleSignIn} className="btn-primary w-full">Sign in with Google</button>
-        <button onClick={() => { setIdToken('hackathon-bypass-token'); setUser({ displayName: 'College Admin', photoURL: '', email: 'admin@college.edu' }); }} className="btn-ghost w-full mt-3">Demo Mode</button>
-      </div>
+    <div className="min-h-screen flex items-center justify-center relative overflow-hidden bg-surface p-6">
+      <div className="absolute inset-0 bg-mesh" />
+      <motion.div
+        initial={{ opacity: 0, y: 24, scale: 0.98 }}
+        animate={{ opacity: 1, y: 0, scale: 1 }}
+        transition={{ duration: 0.5, ease: [0.16, 1, 0.3, 1] }}
+        className="relative z-10 w-full max-w-md rounded-[24px] bg-white border border-slate-100 shadow-premium-lg p-8"
+      >
+        <div className="text-center mb-7">
+          <div className="w-16 h-16 rounded-2xl bg-gradient-to-br from-indigo-600 to-teal-400 flex items-center justify-center mx-auto mb-4 shadow-lg shadow-indigo-500/25">
+            <span className="text-white font-black text-2xl">IQ</span>
+          </div>
+          <h1 className="text-2xl font-extrabold text-on-surface tracking-tight">InvisiQ Admin</h1>
+          <p className="text-on-surface-variant text-sm mt-1">Sign in to manage your queues</p>
+        </div>
+
+        {authError && (
+          <div className="bg-danger-light text-danger-dark text-sm p-3.5 rounded-xl mb-5 border border-red-100">{authError}</div>
+        )}
+
+        <form onSubmit={handleJWTLogin} className="space-y-3">
+          <input
+            type="text" value={usernameInput} onChange={e => setUsernameInput(e.target.value)}
+            placeholder="Username" required autoFocus className="input-field"
+          />
+          <input
+            type="password" value={passwordInput} onChange={e => setPasswordInput(e.target.value)}
+            placeholder="Password" required className="input-field"
+          />
+          <button type="submit" disabled={loginLoading} className="btn-primary w-full mt-2">
+            {loginLoading ? 'Signing in…' : 'Sign in'}
+          </button>
+        </form>
+
+        <div className="mt-5 pt-4 border-t border-slate-100">
+          <button onClick={handleSignIn} className="btn-ghost w-full text-xs">Or continue with Google</button>
+        </div>
+      </motion.div>
     </div>
   );
 
@@ -159,20 +306,24 @@ export default function AdminDashboard() {
             <div className={`sidebar-item ${currentView === 'dashboard' ? 'active' : ''}`} onClick={() => { setCurrentView('dashboard'); setSidebarOpen(false); }} style={{ cursor: 'pointer' }}>
               <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.8" d="M4 6a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2V6zm10 0a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2V6zM4 16a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2v-2zm10 0a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2v-2z" /></svg> Dashboard
             </div>
-            <div className={`sidebar-item ${currentView === 'queue' ? 'active' : ''}`} onClick={() => { setCurrentView('queue'); setSidebarOpen(false); }} style={{ cursor: 'pointer' }}>
-              <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.8" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2" /></svg> Queue Overview
-            </div>
             <div className={`sidebar-item ${currentView === 'analytics' ? 'active' : ''}`} onClick={() => { setCurrentView('analytics'); setSidebarOpen(false); }} style={{ cursor: 'pointer' }}>
               <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.8" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" /></svg> Analytics
             </div>
+            {(user?.role === 'super_admin' || user?.cells?.includes('*')) && (
+              <div className={`sidebar-item ${currentView === 'system_control' ? 'active' : ''}`} onClick={() => { setCurrentView('system_control'); setSidebarOpen(false); }} style={{ cursor: 'pointer' }}>
+                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.8" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.066 2.573c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.573 1.066c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.066-2.573c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" /><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.8" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" /></svg> Setup &amp; Admins
+              </div>
+            )}
           </nav>
         </div>
 
         {/* Queue Selector */}
         <div className="px-5 mt-4">
-          <p className="text-xs font-semibold text-on-surface-variant uppercase tracking-wider mb-3">Queues</p>
+          <p className="text-xs font-semibold text-on-surface-variant uppercase tracking-wider mb-3">
+            {user?.role === 'super_admin' ? 'All Queues' : 'My Queues'}
+          </p>
           <div className="space-y-1">
-            {availableQueues.map(q => (
+            {filteredQueues.map(q => (
               <button key={q.id} onClick={() => setActiveQueueId(q.id)}
                 className={`w-full text-left text-sm px-3 py-2.5 rounded-btn transition-all ${activeQueueId === q.id ? 'bg-primary text-white font-semibold' : 'text-on-surface-variant hover:bg-surface'}`}>
                 {q.name}
@@ -187,7 +338,7 @@ export default function AdminDashboard() {
             <div className="w-9 h-9 rounded-full bg-accent flex items-center justify-center text-white font-bold text-sm">{user.displayName?.[0] || 'A'}</div>
             <div className="flex-1 min-w-0">
               <p className="text-sm font-semibold text-on-surface truncate">{user.displayName || 'Admin'}</p>
-              <p className="text-xs text-on-surface-variant">Curator Admin</p>
+              <p className="text-xs text-on-surface-variant">{user.role === 'super_admin' ? '👑 Super Admin' : `🔑 ${user.cells?.join(', ') || 'Cell Admin'}`}</p>
             </div>
             <button onClick={handleSignOut} className="text-on-surface-variant hover:text-danger transition-colors" title="Sign out">
               <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1" /></svg>
@@ -202,75 +353,134 @@ export default function AdminDashboard() {
       {/* ─── Main Content ────────────────────────────────────────── */}
       <main className="flex-1 min-w-0">
         {/* Top Bar */}
-        <header className="bg-white px-6 py-4 flex items-center gap-4 border-b border-gray-100">
-          <button onClick={() => setSidebarOpen(!sidebarOpen)} className="lg:hidden p-2 rounded-btn hover:bg-surface"><svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 6h16M4 12h16M4 18h16" /></svg></button>
-          <div className="flex-1 max-w-md">
-            <div className="flex items-center gap-2 bg-surface rounded-btn px-4 py-2.5">
-              <svg className="w-4 h-4 text-on-surface-variant" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" /></svg>
-              <input type="text" placeholder={currentView === 'analytics' ? 'Search analytics...' : 'Search student tokens or names...'} className="bg-transparent text-sm w-full outline-none text-on-surface placeholder-on-surface-variant" />
+        <header className="bg-white px-6 py-4 flex items-center gap-4 border-b border-gray-100 flex-wrap">
+          <button onClick={() => setSidebarOpen(!sidebarOpen)} className="lg:hidden p-2 rounded-btn hover:bg-surface" aria-label="Menu"><svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 6h16M4 12h16M4 18h16" /></svg></button>
+
+          <div className="flex-1 min-w-0">
+            <p className="text-[10px] font-bold uppercase tracking-widest text-on-surface-variant">Managing queue</p>
+            <div className="flex items-center gap-2 mt-0.5">
+              <h2 className="text-base font-bold text-on-surface truncate">{getQueueName(activeQueueId)}</h2>
+              <span className={`text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-full ${
+                queueStatus?.status === 'open' ? 'bg-teal-100 text-teal-700'
+                  : queueStatus?.status === 'paused' ? 'bg-amber-100 text-amber-700'
+                  : 'bg-red-100 text-red-700'}`}>
+                {queueStatus?.status || 'open'}
+              </span>
             </div>
           </div>
-          <div className="flex items-center gap-3">
-            {currentView === 'dashboard' && (
-              <>
-                <button onClick={() => setShowQRModal(true)} className="btn-ghost text-xs">📱 QR</button>
-                <button onClick={() => setShowReqs(true)} className="btn-ghost text-xs">📄 Docs</button>
-                <button onClick={handlePause} className={`text-xs px-3 py-2 rounded-btn font-semibold transition-all ${queueStatus?.status === 'open' ? 'text-on-surface-variant hover:bg-surface' : 'bg-danger-light text-danger'}`}>
-                  {queueStatus?.status === 'open' ? '⏸ Pause' : '▶ Resume'}
-                </button>
-              </>
-            )}
-            {currentView === 'queue' && (
-              <>
-                <button className="btn-ghost text-xs relative">
-                  🔔
-                  <span className="absolute -top-0.5 -right-0.5 w-2 h-2 rounded-full bg-danger" />
-                </button>
-                <button className="btn-ghost text-xs">⚙️</button>
-              </>
-            )}
-            {currentView === 'analytics' && (
-              <>
-                <button className="btn-ghost text-xs relative">
-                  🔔
-                  <span className="absolute -top-0.5 -right-0.5 w-2 h-2 rounded-full bg-danger" />
-                </button>
-                <button className="btn-ghost text-xs">⚙️</button>
-              </>
-            )}
+
+          <div className="flex items-center gap-2 flex-wrap">
+            <button onClick={fetchAll} className="btn-ghost text-xs">↻ Refresh</button>
+            <button onClick={() => setShowQRModal(true)} className="btn-ghost text-xs">📱 QR code</button>
+            <button onClick={() => setShowReqs(true)} className="btn-ghost text-xs">📄 Documents</button>
+            <button onClick={handlePause} className={`text-xs px-4 py-2 rounded-btn font-semibold transition-all ${queueStatus?.status === 'open' ? 'btn-outline' : 'btn-danger'}`}>
+              {queueStatus?.status === 'open' ? '⏸ Pause joins' : '▶ Resume joins'}
+            </button>
           </div>
         </header>
 
         {/* Route content based on currentView */}
         {currentView === 'dashboard' && (
           <DashboardView
-            loading={loading} queueStatus={queueStatus} serving={serving} waiting={waiting}
-            ghostFlags={ghostFlags} actionLoading={actionLoading} briefing={briefing}
-            notifications={notifications} activeQueueId={activeQueueId} idToken={idToken}
-            fetchAll={fetchAll} handleCall={handleCall} handleAttended={handleAttended}
-            handleRemoved={handleRemoved} handleDone={handleDone}
-          />
-        )}
-        {currentView === 'queue' && (
-          <QueueOverviewView
-            loading={loading} queueStatus={queueStatus} users={users}
+            loading={loading} queueStatus={queueStatus} users={users} waiting={waiting}
             ghostFlags={ghostFlags} actionLoading={actionLoading}
-            activeQueueId={activeQueueId} fetchAll={fetchAll}
-            handleCall={handleCall} handleAttended={handleAttended}
+            notifications={notifications} activeQueueId={activeQueueId} idToken={idToken}
+            fetchAll={fetchAll} handleAttended={handleAttended}
             handleRemoved={handleRemoved} handleDone={handleDone}
+            onPreviewDocuments={setDocPreview}
           />
         )}
         {currentView === 'analytics' && (
           <AnalyticsView briefing={briefing} queueStatus={queueStatus} activeQueueId={activeQueueId} idToken={idToken} />
         )}
+        {currentView === 'system_control' && (user?.role === 'super_admin' || user?.cells?.includes('*')) && (
+          <SystemControlView idToken={idToken} onQueueCreated={loadQueuesList} />
+        )}
       </main>
 
       {/* Modals */}
-      {showQRModal && <QRModal queueId={activeQueueId} onClose={() => setShowQRModal(false)} />}
+      {showQRModal && <QRModal queueId={activeQueueId} queueName={getQueueName(activeQueueId)} onClose={() => setShowQRModal(false)} />}
       {showReqs && (
         <div className="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4" onClick={() => setShowReqs(false)}>
           <div className="bg-white rounded-card max-w-lg w-full p-6 max-h-[80vh] overflow-y-auto" onClick={e => e.stopPropagation()}>
             <RequirementsManager queueId={activeQueueId} token={idToken} onClose={() => setShowReqs(false)} />
+          </div>
+        </div>
+      )}
+      {docPreview && (
+        <div className="fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4" onClick={() => setDocPreview(null)}>
+          <div className="w-full max-w-4xl rounded-3xl overflow-hidden bg-white shadow-2xl" onClick={(e) => e.stopPropagation()}>
+            <div className="flex items-center justify-between gap-4 px-6 py-4 border-b border-slate-200">
+              <div>
+                <p className="text-xs font-bold uppercase tracking-wider text-on-surface-variant">Uploaded documents</p>
+                <h3 className="text-lg font-bold text-on-surface">{docPreview.userName || 'Student'} {docPreview.token ? `• ${docPreview.token}` : ''}</h3>
+              </div>
+              <button onClick={() => setDocPreview(null)} className="w-10 h-10 rounded-full hover:bg-slate-100 text-slate-500 text-xl leading-none">×</button>
+            </div>
+            <div className="grid md:grid-cols-[280px_1fr] min-h-[65vh]">
+              <div className="border-r border-slate-200 bg-slate-50 p-4 overflow-y-auto">
+                <p className="text-xs font-semibold uppercase tracking-wider text-slate-500 mb-3">Files</p>
+                <div className="space-y-2">
+                  {(docPreview.documents || []).map((doc, index) => (
+                    <button
+                      key={`${doc.name || 'doc'}-${index}`}
+                      onClick={() => setDocPreview(prev => ({ ...prev, activeIndex: index }))}
+                      className={`w-full text-left px-3 py-3 rounded-2xl transition-colors ${docPreview.activeIndex === index ? 'bg-primary text-white' : 'bg-white hover:bg-slate-100 text-on-surface'}`}
+                    >
+                      <p className="text-sm font-semibold truncate">{doc.name || `Document ${index + 1}`}</p>
+                      <p className={`text-[11px] mt-1 truncate ${docPreview.activeIndex === index ? 'text-white/75' : 'text-slate-500'}`}>{doc.url || 'No file URL available'}</p>
+                    </button>
+                  ))}
+                  {(docPreview.documents || []).length === 0 && (
+                    <div className="rounded-2xl bg-white p-4 text-sm text-slate-500">No uploaded documents for this user.</div>
+                  )}
+                </div>
+              </div>
+              <div className="p-4 md:p-6 bg-white">
+                {(() => {
+                  const currentDoc = (docPreview.documents || [])[docPreview.activeIndex || 0];
+                  if (!currentDoc) {
+                    return <div className="h-full min-h-[420px] rounded-3xl bg-slate-50 flex items-center justify-center text-slate-500">Select a file to preview it here.</div>;
+                  }
+
+                  const isImage = /\.(png|jpe?g|gif|webp|bmp|svg)$/i.test(currentDoc.url || currentDoc.name || '');
+                  const isPdf = /\.pdf$/i.test(currentDoc.url || currentDoc.name || '');
+
+                  return (
+                    <div className="space-y-4">
+                      <div className="flex items-start justify-between gap-4">
+                        <div>
+                          <p className="text-xs font-semibold uppercase tracking-wider text-slate-500">Preview</p>
+                          <h4 className="text-base font-bold text-on-surface mt-1">{currentDoc.name || 'Document'}</h4>
+                        </div>
+                        {currentDoc.url && (
+                          <a href={currentDoc.url} target="_blank" rel="noreferrer" className="text-sm font-semibold text-primary hover:underline">Open in new tab</a>
+                        )}
+                      </div>
+                      <div className="min-h-[420px] rounded-3xl overflow-hidden bg-slate-100 flex items-center justify-center">
+                        {currentDoc.url ? (
+                          isImage ? (
+                            <img src={currentDoc.url} alt={currentDoc.name || 'Uploaded document'} className="w-full h-full object-contain" />
+                          ) : isPdf ? (
+                            <iframe title={currentDoc.name || 'Uploaded document'} src={currentDoc.url} className="w-full h-[70vh] border-0" />
+                          ) : (
+                            <div className="p-6 text-center">
+                              <p className="text-lg font-semibold text-on-surface">Preview unavailable</p>
+                              <p className="text-sm text-on-surface-variant mt-2">This file type can be opened in a new tab.</p>
+                            </div>
+                          )
+                        ) : (
+                          <div className="p-6 text-center">
+                            <p className="text-lg font-semibold text-on-surface">No preview URL</p>
+                            <p className="text-sm text-on-surface-variant mt-2">The upload exists, but the link is missing.</p>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })()}
+              </div>
+            </div>
           </div>
         </div>
       )}
@@ -282,587 +492,310 @@ export default function AdminDashboard() {
 /* ═══════════════════════════════════════════════════════════════════
    DASHBOARD VIEW — the original main dashboard content
    ═══════════════════════════════════════════════════════════════════ */
-function DashboardView({ loading, queueStatus, serving, waiting, ghostFlags, actionLoading, briefing, notifications, activeQueueId, idToken, fetchAll, handleCall, handleAttended, handleRemoved, handleDone }) {
+function DashboardView({
+  loading, queueStatus, users = [], waiting = [], ghostFlags, actionLoading,
+  notifications = [], activeQueueId, idToken, fetchAll,
+  handleAttended, handleRemoved, handleDone, onPreviewDocuments,
+}) {
   const [counterLoading, setCounterLoading] = useState(false);
 
-  const countersOpen = queueStatus?.counters_open || 1;
-  const queueCount = queueStatus?.count || 0;
-  const COUNTER_THRESHOLD = 8; // suggest adding counter when students per counter > threshold
-  const studentsPerCounter = countersOpen > 0 ? Math.ceil(queueCount / countersOpen) : queueCount;
-  const shouldSuggestMore = queueCount > 0 && studentsPerCounter >= COUNTER_THRESHOLD;
+  const counters = queueStatus?.counters || [];
+  const crowd = queueStatus?.crowd;
+  const idleCounters = counters.filter(c => (c.status || 'idle') === 'idle');
+  const servingUsers = users.filter(u => u.status === 'called' || u.status === 'in_service');
+  const waitingCount = queueStatus?.waiting_count ?? waiting.length;
+  const countersOpen = counters.length || queueStatus?.counters_open || 1;
+  const crowdLevel = crowd?.level || queueStatus?.congestion || 'normal';
+  const recommendations = Array.isArray(crowd?.recommendations) ? crowd.recommendations : [];
 
-  const handleAddCounter = async () => {
+  const userForCounter = (cid) => servingUsers.find(u => u.counter_id === cid) || null;
+
+  const callOnCounter = async (cid) => {
+    if (!cid) return;
+    setCounterLoading(true);
+    try { await callNextUser(activeQueueId, idToken, cid); await fetchAll(); }
+    catch (e) { console.error('Call error:', e); }
+    finally { setCounterLoading(false); }
+  };
+
+  const addCounter = async () => {
     setCounterLoading(true);
     try { await updateCounters(activeQueueId, 'add', idToken); await fetchAll(); }
     catch (e) { console.error('Add counter error:', e); }
     finally { setCounterLoading(false); }
   };
 
-  const handleRemoveCounter = async () => {
+  const removeCounter = async (cid) => {
     setCounterLoading(true);
-    try { await updateCounters(activeQueueId, 'remove', idToken); await fetchAll(); }
+    try { await updateCounters(activeQueueId, { action: 'remove', counter_id: cid }, idToken); await fetchAll(); }
     catch (e) { console.error('Remove counter error:', e); }
     finally { setCounterLoading(false); }
   };
 
-  return (
-    <div className="p-6">
-      {/* ─── Stats Row ──────────────────────────────────────────── */}
-      <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
-        {loading ? [1,2,3,4].map(i => <div key={i} className="skeleton h-24 rounded-card" />) : (<>
-          <div className="stat-card animate-fade-in-up stagger-1">
-            <p className="text-sm text-on-surface-variant font-medium">People in Queue</p>
-            <p className="text-3xl font-bold text-on-surface mt-1">{queueCount}</p>
-          </div>
-          <div className="stat-card animate-fade-in-up stagger-2">
-            <p className="text-sm text-on-surface-variant font-medium">Avg Wait</p>
-            <p className="text-3xl font-bold text-on-surface mt-1">{queueStatus?.avg_wait || 0}<span className="text-lg text-on-surface-variant ml-1">m</span></p>
-          </div>
-          <div className="stat-card animate-fade-in-up stagger-3">
-            <p className="text-sm text-on-surface-variant font-medium">Status</p>
-            <div className="flex items-center gap-2 mt-1"><span className={`status-dot ${queueStatus?.congestion || 'normal'}`} /><span className="text-3xl font-bold text-on-surface capitalize">{queueStatus?.congestion || 'Normal'}</span></div>
-          </div>
-          <div className="stat-card animate-fade-in-up stagger-4">
-            <p className="text-sm text-on-surface-variant font-medium">Counters</p>
-            <div className="flex items-center gap-2 mt-1">
-              <button onClick={handleRemoveCounter} disabled={counterLoading || countersOpen <= 1}
-                className="w-8 h-8 rounded-lg flex items-center justify-center text-lg font-bold transition-all"
-                style={{ background: countersOpen <= 1 ? '#f0f2f5' : '#fee2e2', color: countersOpen <= 1 ? '#ccc' : '#e53935', cursor: countersOpen <= 1 ? 'not-allowed' : 'pointer' }}>−</button>
-              <span className="text-3xl font-bold text-on-surface">{countersOpen}</span>
-              <button onClick={handleAddCounter} disabled={counterLoading}
-                className="w-8 h-8 rounded-lg flex items-center justify-center text-lg font-bold transition-all hover:scale-105"
-                style={{ background: shouldSuggestMore ? '#fef3c7' : '#ecfdf5', color: shouldSuggestMore ? '#92400e' : '#00c896', cursor: 'pointer' }}>+</button>
-            </div>
-            {shouldSuggestMore && (
-              <p className="text-[10px] font-semibold mt-1.5 px-2 py-1 rounded-full inline-block" style={{ background: '#fef3c7', color: '#92400e' }}>
-                ⚠ {studentsPerCounter} per counter — add more
-              </p>
-            )}
-          </div>
-        </>)}
-      </div>
-
-      <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
-        {/* ─── Center (Hero + Queue) ────────────────────────────── */}
-        <div className="lg:col-span-8 space-y-6">
-          {/* Hero: Currently Serving */}
-          {serving ? (
-            <div className="card-hero animate-fade-in-up">
-              <span className="inline-block px-3 py-1 rounded-full text-xs font-bold bg-accent text-white mb-4 tracking-wide">SERVING NOW</span>
-              <h2 className="text-3xl lg:text-4xl font-extrabold mb-2">{serving.name}</h2>
-              <p className="text-white/80 text-lg mb-1">Token: <span className="font-mono font-bold">{serving.token}</span></p>
-              <div className="flex items-center gap-3 mb-6">
-                <IntentBadge category={serving.intent_category} />
-                <span className="text-white/50 text-sm">{serving.status === 'in_service' ? '🔧 In Service' : '📢 Called'}</span>
-              </div>
-              {serving.intent_details && <p className="text-white/50 text-sm italic mb-6">"{serving.intent_details}"</p>}
-              <ServiceTimer user={serving} />
-              <div className="flex gap-3 mt-6 relative z-10">
-                {serving.status === 'called' && (
-                  <button onClick={() => handleAttended(serving.userId)} disabled={actionLoading === serving.userId} className="btn-accent flex-1">Attended</button>
-                )}
-                {serving.status === 'in_service' && (
-                  <button onClick={() => handleDone(serving.userId)} disabled={actionLoading === serving.userId} className="btn-accent flex-1">✅ Done</button>
-                )}
-                <button onClick={() => handleRemoved(serving.userId)} disabled={actionLoading === serving.userId} className="btn-danger">Removed</button>
-              </div>
-            </div>
-          ) : (
-            <div className="card-hero text-center py-12 animate-fade-in-up">
-              <p className="text-white/60 text-lg mb-4">No one being served right now</p>
-              {waiting.length > 0 && <button onClick={handleCall} className="btn-accent">📢 Call Next Student</button>}
-            </div>
-          )}
-
-          {/* Live Queue */}
-          <div>
-            <div className="flex items-center justify-between mb-4">
-              <h3 className="text-xl font-bold text-on-surface italic">Live Queue</h3>
-              <button onClick={fetchAll} className="btn-ghost text-xs">↻ Refresh</button>
-            </div>
-
-            {loading ? (
-              <div className="space-y-3">{[1,2,3].map(i => <div key={i} className="skeleton h-20 rounded-card" />)}</div>
-            ) : waiting.length === 0 ? (
-              <div className="card text-center py-12 animate-fade-in-scale">
-                <span className="text-4xl block mb-3">📭</span>
-                <p className="text-on-surface-variant">Queue is empty</p>
-              </div>
-            ) : (
-              <div className="space-y-3">
-                {waiting.map((u, i) => (
-                  <QueueRow key={u.userId} user={u} ghostFlags={ghostFlags} actionLoading={actionLoading}
-                    onCall={handleCall} onAttended={handleAttended} onRemoved={handleRemoved}
-                    style={{ animationDelay: `${i * 60}ms` }} />
-                ))}
-              </div>
-            )}
-          </div>
-        </div>
-
-        {/* ─── Right Panel ──────────────────────────────────────── */}
-        <div className="lg:col-span-4 space-y-6">
-          {/* AI Overview */}
-          <div className="card animate-fade-in-up stagger-3">
-            <h3 className="font-bold text-on-surface flex items-center gap-2 mb-4"><span>✨</span> AI Overview</h3>
-            {(() => {
-              const count = queueStatus?.count || 0;
-              const avgWait = queueStatus?.avg_wait || 0;
-              const congestion = queueStatus?.congestion || 'normal';
-              const countersOpen = queueStatus?.counters_open || 1;
-              const waitingList = waiting || [];
-
-              // Compute top intent from waiting users
-              const intentMap = {};
-              waitingList.forEach(u => {
-                if (u.intent_category) intentMap[u.intent_category] = (intentMap[u.intent_category] || 0) + 1;
-              });
-              const topIntent = Object.entries(intentMap).sort((a, b) => b[1] - a[1])[0];
-              const formatCat = (c) => c ? c.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase()) : '';
-
-              // Smart recommendation based on real state
-              const spc = countersOpen > 0 ? Math.ceil(count / countersOpen) : count;
-              let recommendation = '';
-              if (count === 0) recommendation = 'Queue is empty — no action needed';
-              else if (spc >= 8) recommendation = `${spc} students per counter — add a counter to reduce wait times`;
-              else if (congestion === 'critical') recommendation = `Critical load — consider opening more counters`;
-              else if (congestion === 'surge') recommendation = `Surge detected — monitor and prepare additional staff`;
-              else if (avgWait > 20) recommendation = `Avg wait ${avgWait}m exceeds target — increase throughput`;
-              else if (count > 5) recommendation = `${count} students, ${countersOpen} counter${countersOpen > 1 ? 's' : ''} — throughput is healthy`;
-              else recommendation = `Operations smooth — ${count} student${count !== 1 ? 's' : ''} at ${countersOpen} counter${countersOpen > 1 ? 's' : ''}`;
-
-              // Use AI briefing if available, otherwise use computed data
-              const peakText = briefing?.peak_time || (count > 0 ? `${count} active, ~${avgWait}m avg wait` : 'No active queue right now');
-              const recText = briefing?.recommendation || recommendation;
-              const summaryText = briefing?.summary || (topIntent ? `Top intent: ${formatCat(topIntent[0])} (${topIntent[1]} student${topIntent[1] > 1 ? 's' : ''})${serving ? ` • Currently serving ${serving.name}` : ''}` : (serving ? `Currently serving ${serving.name}` : null));
-
-              return (
-                <div className="space-y-4">
-                  <div className="flex items-start gap-3">
-                    <div className="w-8 h-8 rounded-full bg-primary/10 flex items-center justify-center flex-shrink-0"><span className="text-sm">📊</span></div>
-                    <div><p className="text-xs text-on-surface-variant font-semibold uppercase">Queue Status</p><p className="text-sm font-bold text-on-surface">{peakText}</p></div>
-                  </div>
-                  <div className="flex items-start gap-3">
-                    <div className="w-8 h-8 rounded-full bg-accent/10 flex items-center justify-center flex-shrink-0"><span className="text-sm">💡</span></div>
-                    <div><p className="text-xs text-on-surface-variant font-semibold uppercase">Recommendation</p><p className="text-sm font-bold text-on-surface">{recText}</p></div>
-                  </div>
-                  {summaryText && <div className="bg-surface rounded-btn p-3"><p className="text-sm text-on-surface-variant italic">"{summaryText}"</p></div>}
-                </div>
-              );
-            })()}
-          </div>
-
-          {/* Notifications */}
-          <div className="card animate-fade-in-up stagger-4">
-            <h3 className="font-bold text-on-surface mb-4">Notifications</h3>
-            {notifications.length === 0 ? (
-              <p className="text-sm text-on-surface-variant text-center py-8">No alerts yet</p>
-            ) : (
-              <div className="space-y-2 max-h-72 overflow-y-auto">
-                {notifications.slice(0, 8).map((n, i) => (
-                  <div key={i} className="flex items-start gap-2 p-2.5 rounded-btn bg-surface text-sm animate-slide-up">
-                    <span className="flex-shrink-0">{n.type === 'call' ? '📢' : n.type === 'done' ? '✅' : n.type === 'remove' ? '❌' : n.type === 'ghost' ? '👻' : n.type === 'surge' ? '⚡' : '🔔'}</span>
-                    <p className="text-on-surface-variant flex-1">{n.message}</p>
-                    <span className="text-xs text-on-surface-muted flex-shrink-0">{Math.round((Date.now() - n.timestamp) / 60000)}m</span>
-                  </div>
-                ))}
-              </div>
-            )}
-          </div>
-        </div>
-      </div>
-
-      {/* ─── Surge Alert Bar ──────────────────────────────────── */}
-      {notifications.some(n => n.type === 'surge') && (
-        <div className="surge-bar mt-6 animate-slide-up">
-          <span className="text-xl">⚡</span>
-          <div className="flex-1">
-            <p className="font-bold text-on-surface text-sm">Surge Alert</p>
-            <p className="text-xs text-on-surface-variant">High join rate detected in {getQueueName(activeQueueId)}. Current wait time spike.</p>
-          </div>
-          <button className="btn-primary text-xs px-4 py-2">Manage Flow</button>
-        </div>
-      )}
-    </div>
-  );
-}
-
-
-/* ═══════════════════════════════════════════════════════════════════
-   QUEUE OVERVIEW VIEW — Real-time queue management table
-   ═══════════════════════════════════════════════════════════════════ */
-function QueueOverviewView({ loading, queueStatus, users, ghostFlags, actionLoading, activeQueueId, fetchAll, handleCall, handleAttended, handleRemoved, handleDone }) {
-  const [search, setSearch] = useState('');
-  const [filter, setFilter] = useState('all'); // 'all' | intent categories
-  const [showCount, setShowCount] = useState(10);
-
-  // Categorize users
-  const allUsers = useMemo(() => {
-    return users
-      .filter(u => ['waiting', 'called', 'in_service'].includes(u.status))
-      .sort((a, b) => (a.position || 999) - (b.position || 999));
-  }, [users]);
-
-  // Get unique intent categories from real data
-  const intentCategories = useMemo(() => {
-    const cats = new Set();
-    allUsers.forEach(u => { if (u.intent_category) cats.add(u.intent_category); });
-    return Array.from(cats);
-  }, [allUsers]);
-
-  // Filter and search
-  const filteredUsers = useMemo(() => {
-    let list = allUsers;
-    if (filter !== 'all') {
-      list = list.filter(u => u.intent_category === filter);
-    }
-    if (search.trim()) {
-      const q = search.toLowerCase();
-      list = list.filter(u =>
-        u.name?.toLowerCase().includes(q) ||
-        u.token?.toLowerCase().includes(q) ||
-        u.intent_category?.toLowerCase().includes(q)
-      );
-    }
-    return list;
-  }, [allUsers, filter, search]);
-
-  const displayedUsers = filteredUsers.slice(0, showCount);
-
-  // Format intent label
-  const formatIntent = (cat) => {
-    if (!cat) return 'General';
-    return cat.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase());
+  const pauseJoins = async () => {
+    try { await pauseQueue(activeQueueId, idToken); await fetchAll(); }
+    catch (e) { console.error(e); }
   };
 
-  // Urgency color
-  const getUrgencyColor = (score) => {
-    if (score >= 70) return '#e53935';
-    if (score >= 40) return '#1a3c8f';
-    return '#93c5fd';
-  };
+  const firstCallable = (idleCounters[0]?.id) || (counters[0]?.id) || 'counter_1';
 
-  // Status badge
-  const getStatusBadge = (user) => {
-    if (user.status === 'called' || user.status === 'in_service') {
-      return { label: 'CALLED', bg: '#e53935', color: 'white' };
-    }
-    const waitMin = user.join_time ? Math.round((Date.now() - user.join_time) / 60000) : 0;
-    return { label: `WAITING (${waitMin}M)`, bg: '#f4f6fa', color: '#64748b', border: '1px solid #e8ecf2' };
-  };
-
-  // Risk badge
-  const getRiskBadge = (bail) => {
-    if (bail >= 70) return { label: `${bail}%`, color: '#e53935', icon: '⚠️' };
-    if (bail >= 40) return { label: `${bail}%`, color: '#f59e0b', icon: '⚠️' };
-    return { label: null, color: '#94a3b8', icon: '😊' };
-  };
-
-  // Intent badge color
-  const getIntentColor = (cat) => {
-    const map = {
-      fee_payment: { bg: '#eef2ff', color: '#1a3c8f', border: '#dce4ff' },
-      admission: { bg: '#fef3c7', color: '#92400e', border: '#fde68a' },
-      tc_mc_request: { bg: '#fee2e2', color: '#991b1b', border: '#fecaca' },
-      scholarship: { bg: '#ecfdf5', color: '#065f46', border: '#a7f3d0' },
-      bonafide_cert: { bg: '#f0f9ff', color: '#0369a1', border: '#bae6fd' },
-      exam_query: { bg: '#fdf4ff', color: '#86198f', border: '#f0abfc' },
-    };
-    return map[cat] || { bg: '#f4f6fa', color: '#64748b', border: '#e8ecf2' };
-  };
-
-  // Download CSV report
-  const downloadReport = () => {
-    const headers = ['Position', 'Name', 'Token', 'Intent', 'Urgency Score', 'Bail Risk %', 'Status', 'Wait (min)', 'Counter'];
-    const rows = allUsers.map(u => [
-      u.position,
-      u.name,
-      u.token,
-      formatIntent(u.intent_category),
-      u.urgency_score || 0,
-      u.bail_probability || 0,
-      u.status,
-      u.join_time ? Math.round((Date.now() - u.join_time) / 60000) : '—',
-      u.counter_id || '—',
-    ]);
-    const csv = [headers.join(','), ...rows.map(r => r.join(','))].join('\n');
+  const exportCsv = () => {
+    const rows = [
+      ['Position', 'Name', 'Token', 'Reason', 'Status', 'Waiting (min)'],
+      ...users
+        .filter(u => ['waiting', 'called', 'in_service'].includes(u.status))
+        .sort((a, b) => (a.position || 999) - (b.position || 999))
+        .map(u => [
+          u.position || '',
+          `"${(u.name || '').replace(/"/g, '""')}"`,
+          u.token || '',
+          `"${(u.intent_details || u.intent_category || '').replace(/"/g, '""')}"`,
+          u.status || '',
+          u.join_time ? Math.round((Date.now() - u.join_time) / 60000) : '',
+        ]),
+    ];
+    const csv = rows.map(r => r.join(',')).join('\n');
     const blob = new Blob([csv], { type: 'text/csv' });
     const a = document.createElement('a');
     a.href = URL.createObjectURL(blob);
-    a.download = `${activeQueueId}_queue_report_${new Date().toISOString().slice(0, 10)}.csv`;
+    a.download = `${activeQueueId}_queue_${new Date().toISOString().slice(0, 10)}.csv`;
     a.click();
+    URL.revokeObjectURL(a.href);
   };
 
-  const waitingCount = allUsers.filter(u => u.status === 'waiting').length;
-  const calledCount = allUsers.filter(u => u.status === 'called' || u.status === 'in_service').length;
-  const surgeActive = queueStatus?.surge_active || queueStatus?.congestion === 'critical';
-
   return (
-    <div className="p-6 space-y-6 animate-fade-in-up">
-      {/* Page Header */}
-      <div className="flex items-start justify-between flex-wrap gap-4">
-        <div>
-          <h1 className="text-2xl font-extrabold text-on-surface">Queue Overview</h1>
-          <p className="text-sm text-on-surface-variant mt-1">Real-time management of active student sessions and service flow.</p>
+    <div className="p-6 space-y-6">
+      {/* ─── Step 1: What needs attention (only if there is something) ─── */}
+      {recommendations.length > 0 && (
+        <div className="space-y-2">
+          {recommendations.map((r) => (
+            <div key={r.id} className={`flex flex-wrap items-center gap-3 rounded-2xl p-4 border ${
+              r.severity === 'high' ? 'bg-red-50 border-red-100'
+                : r.severity === 'warning' ? 'bg-amber-50 border-amber-100'
+                : 'bg-indigo-50 border-indigo-100'
+            }`}>
+              <span className="text-xl">{r.severity === 'high' ? '⚠️' : r.severity === 'warning' ? '⏱' : '💡'}</span>
+              <div className="flex-1 min-w-[200px]">
+                <p className="text-sm font-bold text-on-surface">{r.title}</p>
+                <p className="text-xs text-on-surface-variant mt-0.5">{r.detail}</p>
+              </div>
+              <div className="flex gap-2">
+                {r.action === 'call_next' && (idleCounters[0] || counters[0]) && (
+                  <button onClick={() => callOnCounter(firstCallable)} disabled={counterLoading} className="btn-primary text-xs px-4 py-2">Call next</button>
+                )}
+                {r.action === 'add_counter' && (
+                  <button onClick={addCounter} disabled={counterLoading} className="btn-primary text-xs px-4 py-2">Add counter</button>
+                )}
+                {r.action === 'limit_joins' && (
+                  <button onClick={pauseJoins} className="btn-danger text-xs px-4 py-2">Pause joins</button>
+                )}
+              </div>
+            </div>
+          ))}
         </div>
-        <div className="flex items-center gap-3">
-          <button onClick={downloadReport} className="btn-outline text-xs px-4 py-2.5">
-            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" /></svg>
-            Download Report
-          </button>
-          <button onClick={handleCall} className="btn-primary text-xs px-5 py-2.5">
-            📢 Call Next Student
-          </button>
-        </div>
-      </div>
+      )}
 
-      {/* ─── Stat Cards ──────────────────────────────────────────── */}
+      {/* ─── Step 2: Numbers at a glance ─── */}
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
-        {loading ? [1,2,3,4].map(i => <div key={i} className="skeleton h-28 rounded-card" />) : (<>
-          <div className="stat-card animate-fade-in-up stagger-1">
-            <div className="flex items-start justify-between mb-2">
-              <p className="text-[10px] font-bold uppercase tracking-widest text-on-surface-variant">In Queue</p>
-              <svg className="w-5 h-5 text-primary/40" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.5" d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0z" /></svg>
-            </div>
-            <p className="text-4xl font-extrabold text-on-surface">{queueStatus?.count || 0}</p>
-            <p className="text-xs text-on-surface-variant mt-1">{calledCount > 0 ? `${calledCount} being served` : 'All waiting'}</p>
-          </div>
-
-          <div className="stat-card animate-fade-in-up stagger-2">
-            <div className="flex items-start justify-between mb-2">
-              <p className="text-[10px] font-bold uppercase tracking-widest text-on-surface-variant">Avg. Wait</p>
-              <span className="text-base">⏱</span>
-            </div>
-            <p className="text-4xl font-extrabold text-on-surface">{queueStatus?.avg_wait || 0}<span className="text-lg text-on-surface-variant ml-0.5">m</span></p>
-            {(queueStatus?.avg_wait || 0) > 15 ? (
-              <p className="text-xs text-danger font-medium mt-1">▲ Above target (15m)</p>
-            ) : (
-              <p className="text-xs text-on-surface-variant mt-1">Within target</p>
-            )}
-          </div>
-
-          <div className="stat-card animate-fade-in-up stagger-3">
-            <div className="flex items-start justify-between mb-2">
-              <p className="text-[10px] font-bold uppercase tracking-widest text-on-surface-variant">Staff Active</p>
-              <svg className="w-5 h-5 text-primary/40" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.5" d="M5.121 17.804A13.937 13.937 0 0112 16c2.5 0 4.847.655 6.879 1.804M15 10a3 3 0 11-6 0 3 3 0 016 0z" /></svg>
-            </div>
-            <p className="text-4xl font-extrabold text-on-surface">{String(queueStatus?.counters_open || 1).padStart(2, '0')}</p>
-            <p className="text-xs text-on-surface-variant mt-1">{queueStatus?.counters_open || 1} stations available</p>
-          </div>
-
-          <div className="stat-card animate-fade-in-up stagger-4">
-            <div className="flex items-start justify-between mb-2">
-              <p className="text-[10px] font-bold uppercase tracking-widest text-on-surface-variant">Surge Alert</p>
-              <span className="text-base">⚡</span>
-            </div>
-            <p className={`text-4xl font-extrabold capitalize ${
-              queueStatus?.congestion === 'critical' ? 'text-danger' :
-              queueStatus?.congestion === 'surge' ? 'text-warning' :
-              'text-on-surface'
-            }`}>{queueStatus?.congestion || 'Normal'}</p>
-            <p className="text-xs text-on-surface-variant mt-1">
-              {queueStatus?.congestion === 'critical' ? 'Peak enrollment period' :
-               queueStatus?.congestion === 'surge' ? 'Above normal traffic' :
-               'Normal operations'}
-            </p>
-          </div>
+        {loading ? [1, 2, 3, 4].map(i => <div key={i} className="skeleton h-24 rounded-card" />) : (<>
+          <KpiCard label="Waiting" value={waitingCount} sub="students in line" tone="primary" />
+          <KpiCard label="Being served" value={servingUsers.length} sub={`at ${countersOpen} counter${countersOpen > 1 ? 's' : ''}`} tone="accent" />
+          <KpiCard label="Avg wait" value={`${queueStatus?.avg_wait || 0}m`} sub="estimated" tone="violet" />
+          <KpiCard label="Traffic" value={String(crowdLevel).replace(/^\w/, c => c.toUpperCase())} sub="crowd level" tone={crowdLevel === 'surge' ? 'danger' : crowdLevel === 'busy' ? 'warning' : 'success'} />
         </>)}
       </div>
 
-      {/* ─── Live Queue Feed ─────────────────────────────────────── */}
-      <div className="card" style={{ padding: 0 }}>
-        {/* Table Header */}
-        <div className="px-6 pt-5 pb-4 flex items-center justify-between flex-wrap gap-3" style={{ borderBottom: '1px solid #e8ecf2' }}>
-          <div className="flex items-center gap-3">
-            <h3 className="text-lg font-bold text-on-surface">Live Queue Feed</h3>
-            <span className="text-[10px] font-bold uppercase tracking-widest px-2.5 py-1 rounded-full" style={{ background: '#ecfdf5', color: '#00c896' }}>Live Update</span>
+      {/* ─── Step 3: Counters board — the main action surface ─── */}
+      <div>
+        <div className="flex items-center justify-between mb-3 flex-wrap gap-2">
+          <div>
+            <h3 className="text-lg font-bold text-on-surface">Counters</h3>
+            <p className="text-xs text-on-surface-variant">Call a student, then mark them arrived → complete. Simple.</p>
           </div>
-
-          {/* Filter Tabs */}
-          <div className="flex items-center gap-1 flex-wrap">
-            <button
-              onClick={() => setFilter('all')}
-              className={`text-xs px-3.5 py-1.5 rounded-full font-medium transition-all ${
-                filter === 'all' ? 'bg-primary text-white' : 'bg-surface text-on-surface-variant hover:bg-gray-100'
-              }`}
-            >All</button>
-            {intentCategories.map(cat => (
-              <button key={cat}
-                onClick={() => setFilter(filter === cat ? 'all' : cat)}
-                className={`text-xs px-3.5 py-1.5 rounded-full font-medium transition-all ${
-                  filter === cat ? 'bg-primary text-white' : 'bg-surface text-on-surface-variant hover:bg-gray-100'
-                }`}
-              >{formatIntent(cat)}</button>
-            ))}
-          </div>
+          <button onClick={addCounter} disabled={counterLoading} className="btn-outline text-xs px-4 py-2">+ Add counter</button>
         </div>
 
-        {/* Search bar inside table */}
-        <div className="px-6 py-3" style={{ borderBottom: '1px solid #e8ecf2' }}>
-          <div className="flex items-center gap-2 bg-surface rounded-btn px-3 py-2 max-w-sm">
-            <svg className="w-4 h-4 text-on-surface-variant flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" /></svg>
-            <input
-              type="text" value={search} onChange={e => setSearch(e.target.value)}
-              placeholder="Search by name, token, or intent..."
-              className="bg-transparent text-sm w-full outline-none text-on-surface placeholder-on-surface-variant"
-            />
-            {search && <button onClick={() => setSearch('')} className="text-on-surface-variant hover:text-on-surface text-xs">✕</button>}
-          </div>
-        </div>
-
-        {/* Column Headers */}
-        <div className="px-6 py-3 grid items-center gap-4 text-[10px] font-bold uppercase tracking-widest text-on-surface-variant" style={{
-          gridTemplateColumns: '60px 1fr 140px 140px 120px 50px',
-          borderBottom: '1px solid #e8ecf2',
-        }}>
-          <span>Pos</span>
-          <span>Student / Token</span>
-          <span>Intent</span>
-          <span>Urgency</span>
-          <span>Status</span>
-          <span></span>
-        </div>
-
-        {/* Table Body */}
         {loading ? (
-          <div className="p-6 space-y-4">
-            {[1,2,3,4,5].map(i => <div key={i} className="skeleton h-16 rounded-btn" />)}
+          <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
+            {[1, 2, 3].map(i => <div key={i} className="skeleton h-44 rounded-card" />)}
           </div>
-        ) : displayedUsers.length === 0 ? (
-          <div className="text-center py-16">
-            <span className="text-4xl block mb-3">📭</span>
-            <p className="text-on-surface-variant font-medium">{search || filter !== 'all' ? 'No matching students found' : 'Queue is empty'}</p>
-            <p className="text-xs text-on-surface-variant mt-1">{search && 'Try adjusting your search'}</p>
+        ) : counters.length === 0 ? (
+          <div className="card text-center py-10">
+            <p className="text-on-surface-variant">No counters set up for this queue yet.</p>
+            <button onClick={addCounter} className="btn-primary text-xs px-4 py-2 mt-4">+ Add first counter</button>
           </div>
         ) : (
-          <div>
-            {displayedUsers.map((u, idx) => (
-              <QueueTableRow key={u.userId} user={u} idx={idx}
-                ghostFlags={ghostFlags} actionLoading={actionLoading}
-                handleCall={handleCall} handleAttended={handleAttended}
-                handleRemoved={handleRemoved} handleDone={handleDone}
-                getStatusBadge={getStatusBadge}
-                getIntentColor={getIntentColor} getUrgencyColor={getUrgencyColor}
-                formatIntent={formatIntent}
+          <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
+            {counters.map((c) => (
+              <CounterCard
+                key={c.id}
+                counter={c}
+                user={userForCounter(c.id)}
+                totalCounters={counters.length}
+                waitingCount={waitingCount}
+                actionLoading={actionLoading}
+                onCall={callOnCounter}
+                onAttended={handleAttended}
+                onRemoved={handleRemoved}
+                onDone={handleDone}
+                onRemove={removeCounter}
+                onPreviewDocuments={onPreviewDocuments}
               />
             ))}
           </div>
         )}
+      </div>
 
-        {/* Load More */}
-        {filteredUsers.length > showCount && (
-          <div className="text-center py-4" style={{ borderTop: '1px solid #e8ecf2' }}>
-            <button onClick={() => setShowCount(p => p + 10)} className="text-sm font-medium text-primary hover:underline">
-              Load More Students ↓
-            </button>
+      {/* ─── Step 4: Waiting list ─── */}
+      <div className="card">
+        <div className="flex items-center justify-between mb-4">
+          <h3 className="text-lg font-bold text-on-surface">Waiting list <span className="text-on-surface-variant font-medium">({waiting.length})</span></h3>
+          <div className="flex items-center gap-2">
+            <button onClick={exportCsv} className="btn-ghost text-xs">⬇ Export CSV</button>
+            <button onClick={fetchAll} className="btn-ghost text-xs">↻ Refresh</button>
           </div>
-        )}
-
-        {/* Result count */}
-        {!loading && filteredUsers.length > 0 && (
-          <div className="px-6 py-3 flex items-center justify-between text-xs text-on-surface-variant" style={{ borderTop: '1px solid #e8ecf2' }}>
-            <span>Showing {Math.min(showCount, filteredUsers.length)} of {filteredUsers.length} students</span>
-            <button onClick={fetchAll} className="text-primary font-medium hover:underline">↻ Refresh</button>
+        </div>
+        {loading ? (
+          <div className="space-y-3">{[1, 2, 3].map(i => <div key={i} className="skeleton h-16 rounded-btn" />)}</div>
+        ) : waiting.length === 0 ? (
+          <div className="text-center py-10">
+            <span className="text-4xl block mb-2">📭</span>
+            <p className="text-on-surface-variant">Nobody is waiting right now.</p>
+          </div>
+        ) : (
+          <div className="space-y-3">
+            {waiting.map((u, i) => (
+              <QueueRow
+                key={u.userId}
+                user={u}
+                ghostFlags={ghostFlags}
+                actionLoading={actionLoading}
+                onCall={() => callOnCounter(firstCallable)}
+                onAttended={handleAttended}
+                onRemoved={handleRemoved}
+                onPreviewDocuments={onPreviewDocuments}
+                style={{ animationDelay: `${i * 50}ms` }}
+              />
+            ))}
           </div>
         )}
       </div>
 
-      {/* ─── Surge Alert Bar ─────────────────────────────────────── */}
-      {surgeActive && (
-        <div className="surge-bar animate-slide-up">
-          <div className="w-10 h-10 rounded-full flex items-center justify-center flex-shrink-0" style={{ background: 'rgba(229,57,53,0.1)' }}>
-            <span className="text-lg">⚠️</span>
+      {/* ─── Step 5: Recent activity ─── */}
+      <div className="card">
+        <h3 className="font-bold text-on-surface mb-1">Recent activity</h3>
+        <p className="text-xs text-on-surface-variant mb-4">The queue only moves when you act — nothing happens automatically.</p>
+        {notifications.length === 0 ? (
+          <p className="text-sm text-on-surface-variant text-center py-8">No activity yet.</p>
+        ) : (
+          <div className="space-y-2 max-h-80 overflow-y-auto">
+            {notifications.slice(0, 12).map((n, i) => (
+              <div key={i} className="flex items-start gap-2 p-2.5 rounded-btn bg-surface text-sm">
+                <span className="flex-shrink-0">{n.type === 'call' ? '📢' : n.type === 'done' ? '✅' : n.type === 'remove' ? '❌' : n.type === 'ghost' ? '👻' : n.type === 'surge' ? '⚡' : '🔔'}</span>
+                <p className="text-on-surface-variant flex-1">{n.message}</p>
+              </div>
+            ))}
           </div>
-          <div className="flex-1">
-            <p className="font-bold text-on-surface text-sm">Queue Surge Detected</p>
-            <p className="text-xs text-on-surface-variant">The wait time has exceeded target for {waitingCount} students. Consider opening additional stations.</p>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function KpiCard({ label, value, sub, tone = 'primary' }) {
+  const tones = {
+    primary: 'text-primary', accent: 'text-accent', violet: 'text-teal-700',
+    danger: 'text-danger', warning: 'text-warning', success: 'text-success',
+  };
+  return (
+    <div className="stat-card">
+      <p className="text-[10px] font-bold uppercase tracking-widest text-on-surface-variant">{label}</p>
+      <p className={`text-3xl font-extrabold mt-1 ${tones[tone] || tones.primary}`}>{value}</p>
+      <p className="text-xs text-on-surface-variant mt-0.5">{sub}</p>
+    </div>
+  );
+}
+
+function CounterCard({ counter, user, totalCounters, waitingCount, actionLoading, onCall, onAttended, onRemoved, onDone, onRemove, onPreviewDocuments }) {
+  const status = counter.status || (counter.current_user_id ? 'serving' : 'idle');
+  const busy = status !== 'idle' && user;
+  const badge = status === 'idle'
+    ? { t: 'Free', c: 'bg-slate-100 text-slate-500' }
+    : status === 'in_service'
+      ? { t: 'In service', c: 'bg-amber-100 text-amber-700' }
+      : { t: 'Serving', c: 'bg-indigo-100 text-indigo-700' };
+
+  return (
+    <div className="card flex flex-col">
+      <div className="flex items-start justify-between gap-2 mb-4">
+        <div className="flex items-center gap-3">
+          <div className="w-10 h-10 rounded-2xl bg-primary/10 text-primary flex items-center justify-center font-extrabold">
+            {(counter.label || '').match(/\d+/) ? (counter.label.match(/\d+/)[0]) : '•'}
           </div>
-          <button className="btn-danger text-xs px-4 py-2">Open Station</button>
+          <div>
+            <p className="font-bold text-on-surface text-sm">{counter.label || counter.id}</p>
+            <span className={`text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-full ${badge.c}`}>{badge.t}</span>
+          </div>
+        </div>
+        {status === 'idle' && totalCounters > 1 && (
+          <button onClick={() => onRemove(counter.id)} disabled={actionLoading} title="Remove this counter" className="w-7 h-7 rounded-lg text-slate-400 hover:text-danger hover:bg-red-50 flex items-center justify-center">−</button>
+        )}
+      </div>
+
+      {busy ? (
+        <div className="flex-1 flex flex-col">
+          <div className="rounded-2xl bg-surface p-3 mb-3">
+            <div className="flex items-center justify-between gap-2">
+              <p className="font-bold text-on-surface">{user.name}</p>
+              {Array.isArray(user.submitted_documents) && user.submitted_documents.length > 0 && (
+                <button onClick={() => onPreviewDocuments?.({ userName: user.name, token: user.token, documents: user.submitted_documents, activeIndex: 0 })}
+                  className="text-[10px] font-bold uppercase tracking-wide px-2 py-1 rounded-full bg-primary/10 text-primary">
+                  {user.submitted_documents.length} docs
+                </button>
+              )}
+            </div>
+            <p className="text-xs font-mono text-on-surface-variant mt-0.5">{user.token}</p>
+            <ElapsedTimer user={user} />
+          </div>
+          <div className="flex gap-2 mt-auto">
+            {user.status === 'called' && (
+              <button onClick={() => onAttended(user.userId)} disabled={actionLoading === user.userId} className="btn-accent flex-1">Mark arrived</button>
+            )}
+            {user.status === 'in_service' && (
+              <button onClick={() => onDone(user.userId)} disabled={actionLoading === user.userId} className="btn-accent flex-1">Complete</button>
+            )}
+            <button onClick={() => onRemoved(user.userId)} disabled={actionLoading === user.userId} className="btn-danger">No-show</button>
+          </div>
+        </div>
+      ) : (
+        <div className="flex-1 flex flex-col">
+          <p className="text-sm text-on-surface-variant mb-4">No student at this counter.</p>
+          <button
+            onClick={() => onCall(counter.id)}
+            disabled={actionLoading || waitingCount === 0}
+            className={`mt-auto w-full py-3 rounded-xl font-bold text-sm ${waitingCount === 0 ? 'bg-slate-100 text-slate-400 cursor-not-allowed' : 'btn-primary'}`}
+          >
+            {waitingCount === 0 ? 'Queue is empty' : '📢 Call next student'}
+          </button>
         </div>
       )}
     </div>
   );
 }
 
-/* ─── Queue Table Row (for Queue Overview) ────────────────────────── */
-function QueueTableRow({ user: u, idx, ghostFlags, actionLoading, handleCall, handleAttended, handleRemoved, handleDone, getStatusBadge, getIntentColor, getUrgencyColor, formatIntent }) {
-  const [menuOpen, setMenuOpen] = useState(false);
-  const statusBadge = getStatusBadge(u);
-  const intentColor = getIntentColor(u.intent_category);
-  const urgScore = u.urgency_score || 0;
-  const isGhost = ghostFlags?.[u.userId] || u.bail_probability > 85;
-
+function ElapsedTimer({ user, light = false }) {
+  const [now, setNow] = useState(Date.now());
+  useEffect(() => {
+    const iv = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(iv);
+  }, []);
+  const start = user.attended_at || user.called_at || user.join_time || now;
+  const secs = Math.max(0, Math.round((now - start) / 1000));
+  const label = user.status === 'in_service' ? 'Service time' : 'Called';
   return (
-    <div
-      className="px-6 py-4 grid items-center gap-4 transition-all duration-200 hover:bg-surface/50 animate-fade-in-up"
-      style={{
-        gridTemplateColumns: '60px 1fr 140px 140px 120px 50px',
-        borderBottom: '1px solid #f0f2f5',
-        animationDelay: `${idx * 40}ms`,
-      }}
-    >
-      {/* Position */}
-      <span className={`text-2xl font-extrabold ${
-        u.status === 'called' || u.status === 'in_service' ? 'text-primary' : 'text-on-surface'
-      }`}>#{u.position}</span>
-
-      {/* Name & Token */}
-      <div>
-        <p className="text-sm font-semibold text-on-surface flex items-center gap-2">
-          {u.name}
-          {u.priority && u.priority !== 'normal' && <span className={`priority-badge ${u.priority}`}>{u.priority}</span>}
-          {isGhost && <span className="ghost-badge">⚠ Ghost</span>}
-        </p>
-        <p className="text-xs font-mono text-on-surface-variant mt-0.5">{u.token}</p>
-      </div>
-
-      {/* Intent Badge */}
-      <div>
-        <span className="text-xs font-semibold px-3 py-1.5 rounded-full inline-block" style={{
-          background: intentColor.bg, color: intentColor.color, border: `1px solid ${intentColor.border}`,
-        }}>{formatIntent(u.intent_category)}</span>
-      </div>
-
-      {/* Urgency */}
-      <div className="flex items-center gap-2">
-        <div className="flex-1 h-2 rounded-full overflow-hidden" style={{ background: '#e8ecf2', maxWidth: '80px' }}>
-          <div className="h-full rounded-full transition-all duration-500" style={{
-            width: `${Math.min(100, urgScore)}%`,
-            background: getUrgencyColor(urgScore),
-          }} />
-        </div>
-        <span className="text-xs font-bold text-on-surface" style={{ minWidth: '24px' }}>{urgScore}</span>
-      </div>
-
-      {/* Status */}
-      <div>
-        <span className="text-[10px] font-bold uppercase tracking-wider px-2.5 py-1 rounded-full" style={{
-          background: statusBadge.bg, color: statusBadge.color, border: statusBadge.border || 'none',
-        }}>{statusBadge.label}</span>
-      </div>
-
-      {/* Actions Menu */}
-      <div className="relative">
-        <div className="dot-menu" onClick={() => setMenuOpen(!menuOpen)}><span /><span /><span /></div>
-        {menuOpen && (
-          <>
-            <div className="fixed inset-0 z-10" onClick={() => setMenuOpen(false)} />
-            <div className="absolute right-0 top-full mt-1 bg-white rounded-btn shadow-card-hover py-2 w-48 z-20 animate-fade-in-scale">
-              {u.status === 'waiting' && (
-                <button onClick={() => { handleCall?.(); setMenuOpen(false); }} disabled={!!actionLoading} className="w-full text-left px-4 py-2 text-sm hover:bg-surface transition-colors text-primary font-medium">📢 Call to Counter</button>
-              )}
-              {u.status === 'called' && (
-                <button onClick={() => { handleAttended?.(u.userId); setMenuOpen(false); }} disabled={!!actionLoading} className="w-full text-left px-4 py-2 text-sm hover:bg-surface transition-colors text-primary font-medium">✅ Mark Attended</button>
-              )}
-              {u.status === 'in_service' && (
-                <button onClick={() => { handleDone?.(u.userId); setMenuOpen(false); }} disabled={!!actionLoading} className="w-full text-left px-4 py-2 text-sm hover:bg-surface transition-colors text-accent font-medium">✓ Mark Done</button>
-              )}
-              <button onClick={() => { handleRemoved?.(u.userId); setMenuOpen(false); }} disabled={!!actionLoading} className="w-full text-left px-4 py-2 text-sm hover:bg-surface transition-colors text-danger font-medium">✕ Remove</button>
-            </div>
-          </>
-        )}
-      </div>
-    </div>
+    <p className={`text-xs mt-1.5 ${light ? 'text-white/70' : 'text-on-surface-variant'}`}>
+      {label}: <span className="font-mono font-bold">{String(Math.floor(secs / 60)).padStart(2, '0')}:{String(secs % 60).padStart(2, '0')}</span>
+    </p>
   );
 }
 
@@ -872,298 +805,189 @@ function QueueTableRow({ user: u, idx, ghostFlags, actionLoading, handleCall, ha
    ═══════════════════════════════════════════════════════════════════ */
 function AnalyticsView({ briefing, queueStatus, activeQueueId, idToken }) {
   const [analytics, setAnalytics] = useState(null);
-  const [analyticsLoading, setAnalyticsLoading] = useState(true);
+  const [loading, setLoading] = useState(true);
+  const [range, setRange] = useState('today');
 
-  // Fetch real analytics data from backend
   useEffect(() => {
     if (!activeQueueId || !idToken) return;
-    setAnalyticsLoading(true);
-    getAnalytics(activeQueueId, idToken)
-      .then(data => { setAnalytics(data); })
-      .catch(err => { console.error('Analytics fetch error:', err); })
-      .finally(() => setAnalyticsLoading(false));
-  }, [activeQueueId, idToken]);
+    setLoading(true);
+    getAnalytics(activeQueueId, idToken, range)
+      .then(setAnalytics)
+      .catch(() => {})
+      .finally(() => setLoading(false));
+  }, [activeQueueId, idToken, range]);
 
-  // Also refresh every 30s
   useEffect(() => {
     if (!activeQueueId || !idToken) return;
     const iv = setInterval(() => {
-      getAnalytics(activeQueueId, idToken)
-        .then(data => setAnalytics(data))
-        .catch(() => {});
+      getAnalytics(activeQueueId, idToken, range).then(setAnalytics).catch(() => {});
     }, 30000);
     return () => clearInterval(iv);
-  }, [activeQueueId, idToken]);
+  }, [activeQueueId, idToken, range]);
 
-  // Use real data or fallbacks
-  const accuracyData = analytics?.accuracy_data?.length > 0 ? analytics.accuracy_data : [];
-  const heatmapData = analytics?.heatmap_data?.length > 0 ? analytics.heatmap_data : [];
-  const effScore = analytics?.efficiency_score ?? 0;
-  const noShowRate = analytics?.no_show_rate ?? 0;
-  const totalServed = analytics?.total_served_today ?? 0;
-  const currentInQueue = analytics?.active_in_queue ?? queueStatus?.count ?? 0;
-  const predictionAccuracy = analytics?.prediction_accuracy ?? 0;
-  const peakHourLabel = analytics?.peak_hour_label ?? '—';
-  const intentBreakdown = analytics?.intent_breakdown ?? [];
+  const formatIntent = (cat) => (cat || 'General').replace(/_/g, ' ').replace(/\b\w/g, (l) => l.toUpperCase());
+  const rangeLabel = range === 'today' ? 'today' : range === 'week' ? 'this week' : 'this month';
 
-  const outlookCards = [
-    { label: 'DEMAND FORECAST', text: briefing?.expected_peak || (analytics?.peak_hour_label ? `Peak traffic at ${analytics.peak_hour_label}` : 'Analyzing traffic patterns...'), color: '#1a3c8f' },
-    { label: 'RESOURCE LOGIC', text: briefing?.staff_recommendation || `${analytics?.counters_open || 1} counter(s) active — Avg service: ${analytics?.avg_service_time || 7}m`, color: '#1a3c8f' },
-    { label: 'PROACTIVE STRATEGY', text: briefing?.actionable_tip || (totalServed > 0 ? `${totalServed} served today with ${predictionAccuracy}% prediction accuracy` : 'Collecting data for recommendations...'), color: '#1a3c8f' },
-  ];
+  const served = analytics?.total_served_today ?? 0;
+  const removed = analytics?.total_removed_today ?? 0;
+  const total = served + removed;
+  const noShow = analytics?.no_show_rate ?? 0;
+  const avgWait = analytics?.avg_wait ?? queueStatus?.avg_wait ?? 0;
+  const avgService = analytics?.avg_service_time ?? 7;
+  const accuracy = analytics?.prediction_accuracy ?? 0;
+  const inQueue = analytics?.active_in_queue ?? queueStatus?.count ?? 0;
+  const peak = analytics?.peak_hour_label;
+  const heatmap = (analytics?.heatmap_data || []).filter(h => h.count > 0);
+  const intents = analytics?.intent_breakdown || [];
+  const maxIntent = Math.max(1, ...intents.map(i => i.count));
+  const trend = analytics?.daily_served_trend || [];
+  const maxTrend = Math.max(1, ...trend.map(d => d.served));
 
-  // SVG chart dimensions
-  const chartW = 600, chartH = 220, padL = 40, padR = 20, padT = 20, padB = 30;
-  const plotW = chartW - padL - padR;
-  const plotH = chartH - padT - padB;
-
-  const hasChartData = accuracyData.length > 0;
-  const maxVal = hasChartData ? Math.max(1, ...accuracyData.flatMap(d => [d.predicted, d.actual])) : 60;
-
-  const getX = (i) => padL + (i / Math.max(1, accuracyData.length - 1)) * plotW;
-  const getY = (v) => padT + plotH - (v / (maxVal + 10)) * plotH;
-
-  const predictedPath = hasChartData ? accuracyData.map((d, i) => `${i === 0 ? 'M' : 'L'}${getX(i)},${getY(d.predicted)}`).join(' ') : '';
-  const actualPath = hasChartData ? accuracyData.map((d, i) => `${i === 0 ? 'M' : 'L'}${getX(i)},${getY(d.actual)}`).join(' ') : '';
-
-  // Y-axis ticks based on real data range
-  const yStep = Math.max(5, Math.ceil(maxVal / 4 / 5) * 5);
-  const yTicks = [0, yStep, yStep * 2, yStep * 3];
-
-  // Intent color mapping
-  const intentColorMap = {
-    fee_payment: '#1a3c8f', admission: '#92400e', tc_mc_request: '#991b1b',
-    scholarship: '#065f46', bonafide_cert: '#0369a1', exam_query: '#86198f', general: '#64748b',
-  };
-
-  const formatIntentLabel = (cat) => {
-    if (!cat) return 'General';
-    return cat.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase());
-  };
-
-  if (analyticsLoading) {
+  if (loading) {
     return (
       <div className="p-6 space-y-6">
-        <div><h1 className="text-2xl font-extrabold text-on-surface">Performance & AI Insights</h1></div>
-        <div className="skeleton h-48 rounded-card" />
-        <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
-          <div className="lg:col-span-8 skeleton h-72 rounded-card" />
-          <div className="lg:col-span-4 skeleton h-72 rounded-card" />
-        </div>
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-          {[1,2,3].map(i => <div key={i} className="skeleton h-36 rounded-card" />)}
+        <div className="skeleton h-10 w-64 rounded-btn" />
+        <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">{[1, 2, 3, 4].map(i => <div key={i} className="skeleton h-24 rounded-card" />)}</div>
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+          <div className="skeleton h-64 rounded-card" />
+          <div className="skeleton h-64 rounded-card" />
         </div>
       </div>
     );
   }
 
-  return (
-    <div className="p-6 space-y-6 animate-fade-in-up">
-      {/* Page Header */}
-      <div className="flex items-start justify-between">
-        <div>
-          <h1 className="text-2xl font-extrabold text-on-surface">Performance & AI Insights</h1>
-          <p className="text-sm text-on-surface-variant mt-1">Real-time metrics and predictive intelligence for campus operations.</p>
-        </div>
-        <div className="flex items-center gap-2">
-          <span className="text-[10px] font-bold uppercase tracking-widest px-2.5 py-1 rounded-full" style={{ background: '#ecfdf5', color: '#00c896' }}>Live Data</span>
-        </div>
-      </div>
+  const summary = briefing?.summary || briefing?.actionable_tip ||
+    (total > 0
+      ? `${served} student${served === 1 ? '' : 's'} served ${rangeLabel}, with an average wait of about ${avgWait} minutes.`
+      : `No students have been served ${rangeLabel} yet.`);
 
-      {/* ─── AI Daily Briefing Hero ───────────────────────────────── */}
-      <div className="card-hero animate-fade-in-up stagger-1" style={{ padding: '2rem' }}>
-        <div className="flex items-center gap-2 mb-4">
-          <div className="w-8 h-8 rounded-full flex items-center justify-center" style={{ background: 'rgba(255,255,255,0.15)' }}>
-            <span className="text-sm">📡</span>
-          </div>
-          <span className="text-xs font-bold uppercase tracking-widest text-white/60">AI Daily Briefing</span>
+  return (
+    <div className="p-6 space-y-6">
+      {/* Header */}
+      <div className="flex items-start justify-between flex-wrap gap-4">
+        <div>
+          <h1 className="text-2xl font-extrabold text-on-surface">Reports</h1>
+          <p className="text-sm text-on-surface-variant mt-1">A simple summary of how your queue is doing.</p>
         </div>
-        <h2 className="text-3xl font-extrabold text-white mb-5">Today's Outlook</h2>
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-          {outlookCards.map((card, i) => (
-            <div key={i} className="rounded-xl p-4" style={{ background: 'rgba(255,255,255,0.08)', border: '1px solid rgba(255,255,255,0.1)' }}>
-              <p className="text-[10px] font-bold uppercase tracking-widest text-white/50 mb-2">{card.label}</p>
-              <p className="text-sm font-semibold text-white leading-relaxed">{card.text}</p>
-            </div>
+        <div className="flex items-center gap-1 p-1 rounded-xl bg-slate-100">
+          {[{ k: 'today', t: 'Today' }, { k: 'week', t: 'This week' }, { k: 'month', t: 'This month' }].map((opt) => (
+            <button key={opt.k} onClick={() => setRange(opt.k)}
+              className={`text-xs font-semibold px-4 py-2 rounded-lg transition-all ${range === opt.k ? 'bg-white text-primary shadow-sm' : 'text-on-surface-variant hover:text-on-surface'}`}>
+              {opt.t}
+            </button>
           ))}
         </div>
       </div>
 
-      {/* ─── Charts Row ──────────────────────────────────────────── */}
-      <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
-        {/* Wait Time Accuracy Chart */}
-        <div className="lg:col-span-8 card animate-fade-in-up stagger-2">
-          <div className="flex items-start justify-between mb-5">
-            <div>
-              <h3 className="text-lg font-bold text-on-surface">Wait Time Accuracy</h3>
-              <p className="text-xs text-on-surface-variant mt-0.5">
-                {hasChartData ? `Predicted vs. Actual wait times (${accuracyData.length} day${accuracyData.length > 1 ? 's' : ''})` : 'No historical data yet — serve students to start tracking'}
-              </p>
-            </div>
-            {hasChartData && (
-              <div className="flex items-center gap-4">
-                <div className="flex items-center gap-1.5">
-                  <span className="w-2.5 h-2.5 rounded-full" style={{ background: '#1a3c8f' }} />
-                  <span className="text-xs text-on-surface-variant font-medium">Predicted</span>
-                </div>
-                <div className="flex items-center gap-1.5">
-                  <span className="w-2.5 h-2.5 rounded-full" style={{ background: '#00c896' }} />
-                  <span className="text-xs text-on-surface-variant font-medium">Actual</span>
-                </div>
-              </div>
-            )}
-          </div>
+      {/* Key numbers */}
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+        <KpiCard label={`Served ${rangeLabel}`} value={served} sub="completed services" tone="accent" />
+        <KpiCard label="No-shows" value={`${noShow}%`} sub={`${removed} student${removed === 1 ? '' : 's'}`} tone={noShow >= 30 ? 'danger' : 'primary'} />
+        <KpiCard label="Avg waiting time" value={`${avgWait}m`} sub={`service takes ~${avgService}m`} tone="violet" />
+        <KpiCard label="Prediction accuracy" value={`${accuracy}%`} sub="how close our estimates were" tone={accuracy >= 70 ? 'success' : 'warning'} />
+      </div>
 
-          {hasChartData ? (
-            <div className="w-full overflow-hidden">
-              <svg viewBox={`0 0 ${chartW} ${chartH}`} className="w-full" style={{ height: '240px' }}>
-                {yTicks.map(v => (
-                  <g key={v}>
-                    <line x1={padL} y1={getY(v)} x2={chartW - padR} y2={getY(v)} stroke="#e8ecf2" strokeWidth="1" />
-                    <text x={padL - 6} y={getY(v) + 4} textAnchor="end" fill="#94a3b8" fontSize="10" fontFamily="Inter">{v}m</text>
-                  </g>
-                ))}
-                <path d={predictedPath} fill="none" stroke="#1a3c8f" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" />
-                <path d={actualPath} fill="none" stroke="#00c896" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" />
-                {accuracyData.map((d, i) => (
-                  <circle key={`p-${i}`} cx={getX(i)} cy={getY(d.predicted)} r="5" fill="#1a3c8f" stroke="white" strokeWidth="2" />
-                ))}
-                {accuracyData.map((d, i) => (
-                  <circle key={`a-${i}`} cx={getX(i)} cy={getY(d.actual)} r="5" fill="#00c896" stroke="white" strokeWidth="2" />
-                ))}
-                {accuracyData.map((d, i) => (
-                  <text key={`x-${i}`} x={getX(i)} y={chartH - 5} textAnchor="middle" fill="#94a3b8" fontSize="11" fontWeight="500" fontFamily="Inter">{d.day}</text>
-                ))}
-              </svg>
-            </div>
-          ) : (
-            <div className="text-center py-16">
-              <span className="text-4xl block mb-3">📊</span>
-              <p className="text-on-surface-variant font-medium">Chart data will appear here as students are served</p>
-              <p className="text-xs text-on-surface-variant mt-1">Predicted vs actual wait time comparison</p>
-            </div>
-          )}
-        </div>
-
-        {/* Traffic Heatmap */}
-        <div className="lg:col-span-4 card animate-fade-in-up stagger-3">
-          <h3 className="text-lg font-bold text-on-surface mb-1">Traffic Heatmap</h3>
-          <p className="text-xs text-on-surface-variant mb-5">Today's busy periods by hour</p>
-
-          {heatmapData.length > 0 ? (
-            <div className="space-y-3.5">
-              {heatmapData.map((row, i) => {
-                const barColor = row.load >= 90 ? '#b45309' : row.load >= 70 ? '#1a3c8f' : row.load >= 40 ? '#3b82f6' : '#93c5fd';
-                return (
-                  <div key={i} className="flex items-center gap-3">
-                    <span className="text-xs font-medium text-on-surface-variant w-16 flex-shrink-0 text-right">{row.hourLabel}</span>
-                    <div className="flex-1 h-3.5 rounded-full overflow-hidden" style={{ background: '#f0f2f5' }}>
-                      <div className="h-full rounded-full transition-all duration-700" style={{
-                        width: `${Math.max(2, row.load)}%`,
-                        background: barColor,
-                        animationDelay: `${i * 100}ms`,
-                      }} />
-                    </div>
-                    <span className="text-[10px] font-bold text-on-surface-variant w-6">{row.count}</span>
-                  </div>
-                );
-              })}
-            </div>
-          ) : (
-            <div className="text-center py-10">
-              <span className="text-3xl block mb-2">🕐</span>
-              <p className="text-sm text-on-surface-variant">No traffic data for today yet</p>
-            </div>
-          )}
-
-          <div className="flex items-center gap-2 mt-6 pt-4" style={{ borderTop: '1px solid #e8ecf2' }}>
-            <p className="text-xs text-on-surface-variant italic flex-1">
-              {peakHourLabel !== '—' ? `Peak hour: ${peakHourLabel}` : 'Peak hour will be calculated'}
-            </p>
-            <span className="text-lg">📈</span>
-          </div>
+      {/* Plain-language summary */}
+      <div className="card flex items-start gap-3">
+        <span className="text-xl">💡</span>
+        <div>
+          <p className="text-[10px] font-bold uppercase tracking-widest text-on-surface-variant">{range === 'today' ? "Today's summary" : 'Summary'}</p>
+          <p className="text-sm text-on-surface mt-1">{summary}</p>
+          {peak && <p className="text-xs text-on-surface-variant mt-1">Busiest time: <span className="font-semibold text-on-surface">{peak}</span></p>}
         </div>
       </div>
 
-      {/* ─── Intent Breakdown (new section with real data) ────────── */}
-      {intentBreakdown.length > 0 && (
-        <div className="card animate-fade-in-up stagger-4">
-          <h3 className="text-lg font-bold text-on-surface mb-1">Intent Distribution</h3>
-          <p className="text-xs text-on-surface-variant mb-5">Breakdown of student visit purposes</p>
-          <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3">
-            {intentBreakdown.map((item, i) => {
-              const color = intentColorMap[item.category] || '#64748b';
-              const total = intentBreakdown.reduce((s, x) => s + x.count, 0);
-              const pct = total > 0 ? Math.round((item.count / total) * 100) : 0;
-              return (
-                <div key={i} className="rounded-xl p-4 text-center" style={{ background: `${color}08`, border: `1px solid ${color}20` }}>
-                  <p className="text-2xl font-extrabold" style={{ color }}>{pct}%</p>
-                  <p className="text-[10px] font-bold uppercase tracking-wider text-on-surface-variant mt-1">{formatIntentLabel(item.category)}</p>
-                  <p className="text-xs text-on-surface-variant mt-0.5">{item.count} total</p>
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+        {/* Busiest hours */}
+        <div className="card">
+          <h3 className="font-bold text-on-surface">Busiest hours</h3>
+          <p className="text-xs text-on-surface-variant mb-4">How many students joined in each hour ({rangeLabel}).</p>
+          {heatmap.length === 0 ? (
+            <p className="text-sm text-on-surface-variant text-center py-10">No traffic recorded yet.</p>
+          ) : (
+            <div className="space-y-2">
+              {heatmap.map((row) => (
+                <div key={row.hour} className="flex items-center gap-3">
+                  <span className="w-14 text-right text-xs text-on-surface-variant">{row.hourLabel}</span>
+                  <div className="flex-1 h-3 rounded-full bg-slate-100 overflow-hidden">
+                    <div className="h-full rounded-full bg-primary" style={{ width: `${Math.max(4, row.load)}%` }} />
+                  </div>
+                  <span className="w-8 text-xs font-bold text-on-surface">{row.count}</span>
                 </div>
-              );
-            })}
+              ))}
+            </div>
+          )}
+        </div>
+
+        {/* Reasons */}
+        <div className="card">
+          <h3 className="font-bold text-on-surface">What students came for</h3>
+          <p className="text-xs text-on-surface-variant mb-4">Most common reasons ({rangeLabel}).</p>
+          {intents.length === 0 ? (
+            <p className="text-sm text-on-surface-variant text-center py-10">No data yet.</p>
+          ) : (
+            <div className="space-y-3">
+              {intents.slice(0, 6).map((it) => (
+                <div key={it.category}>
+                  <div className="flex justify-between text-xs mb-1">
+                    <span className="font-semibold text-on-surface">{formatIntent(it.category)}</span>
+                    <span className="text-on-surface-variant">{it.count}</span>
+                  </div>
+                  <div className="h-2 rounded-full bg-slate-100 overflow-hidden">
+                    <div className="h-full rounded-full bg-accent" style={{ width: `${Math.round((it.count / maxIntent) * 100)}%` }} />
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* Daily trend (week/month) */}
+      {range !== 'today' && trend.length > 0 && (
+        <div className="card">
+          <h3 className="font-bold text-on-surface">Students served per day</h3>
+          <p className="text-xs text-on-surface-variant mb-5">Daily totals for {analytics?.range_label || rangeLabel}.</p>
+          <div className="flex items-end gap-1.5" style={{ height: '160px' }}>
+            {trend.map((d, i) => (
+              <div key={i} className="flex-1 flex flex-col items-center justify-end h-full gap-1">
+                <span className="text-[10px] font-bold text-on-surface">{d.served || ''}</span>
+                <div className="w-full rounded-t-md bg-primary/80" style={{ height: `${Math.max(4, (d.served / maxTrend) * 120)}px` }} />
+                <span className="text-[9px] text-on-surface-variant">{d.label}</span>
+              </div>
+            ))}
           </div>
         </div>
       )}
 
-      {/* ─── Bottom Metric Cards ─────────────────────────────────── */}
-      <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
-        {/* Efficiency Score */}
-        <div className="card animate-fade-in-up stagger-5" style={{ borderLeft: '4px solid #1a3c8f' }}>
-          <div className="flex items-start justify-between mb-3">
-            <p className="text-[10px] font-bold uppercase tracking-widest text-on-surface-variant">Efficiency Score</p>
-            <div className="w-7 h-7 rounded-lg flex items-center justify-center" style={{ background: 'rgba(26,60,143,0.08)' }}>
-              <svg className="w-4 h-4" fill="none" stroke="#1a3c8f" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>
+      {/* How we did */}
+      <div className="card">
+        <h3 className="font-bold text-on-surface mb-1">How we did {rangeLabel}</h3>
+        <p className="text-xs text-on-surface-variant mb-4">Completed vs missed students at a glance.</p>
+        <div className="grid grid-cols-3 gap-4 mb-4">
+          <MiniStat label="Served" value={served} />
+          <MiniStat label="No-shows" value={removed} />
+          <MiniStat label="In queue now" value={inQueue} />
+        </div>
+        {total > 0 && (
+          <div>
+            <div className="flex h-3 rounded-full overflow-hidden bg-slate-100">
+              <div className="h-full bg-accent" style={{ width: `${Math.round((served / total) * 100)}%` }} />
+              <div className="h-full bg-red-400/80" style={{ width: `${Math.round((removed / total) * 100)}%` }} />
+            </div>
+            <div className="flex justify-between text-[11px] text-on-surface-variant mt-2">
+              <span>✅ Served {Math.round((served / total) * 100)}%</span>
+              <span>❌ No-show {Math.round((removed / total) * 100)}%</span>
             </div>
           </div>
-          <p className="text-5xl font-extrabold text-on-surface">{effScore} <span className="text-lg font-medium text-on-surface-variant">/100</span></p>
-          <p className="text-xs text-on-surface-variant mt-2">Based on prediction accuracy & throughput</p>
-        </div>
-
-        {/* Prediction Accuracy */}
-        <div className="card animate-fade-in-up stagger-5" style={{ borderLeft: '4px solid #3b82f6' }}>
-          <div className="flex items-start justify-between mb-3">
-            <p className="text-[10px] font-bold uppercase tracking-widest text-on-surface-variant">Prediction Accuracy</p>
-            <div className="w-7 h-7 rounded-lg flex items-center justify-center" style={{ background: 'rgba(59,130,246,0.08)' }}>
-              <svg className="w-4 h-4" fill="none" stroke="#3b82f6" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M13 7h8m0 0v8m0-8l-8 8-4-4-6 6" /></svg>
-            </div>
-          </div>
-          <p className="text-5xl font-extrabold text-on-surface">{predictionAccuracy} <span className="text-lg font-medium text-on-surface-variant">%</span></p>
-          <p className="text-xs text-on-surface-variant mt-2">Wait time prediction vs actual</p>
-        </div>
-
-        {/* No-Show Rate */}
-        <div className="card animate-fade-in-up stagger-6" style={{ borderLeft: '4px solid #e53935' }}>
-          <div className="flex items-start justify-between mb-3">
-            <p className="text-[10px] font-bold uppercase tracking-widest text-on-surface-variant">No-Show Rate</p>
-            <div className="w-7 h-7 rounded-lg flex items-center justify-center" style={{ background: 'rgba(229,57,53,0.08)' }}>
-              <svg className="w-4 h-4" fill="none" stroke="#e53935" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M13 17h8m0 0V9m0 8l-8-8-4 4-6-6" /></svg>
-            </div>
-          </div>
-          <p className="text-5xl font-extrabold text-on-surface">{noShowRate} <span className="text-lg font-medium text-on-surface-variant">%</span></p>
-          <p className="text-xs text-on-surface-variant mt-2">{analytics?.total_removed_today || 0} removed out of {(analytics?.total_served_today || 0) + (analytics?.total_removed_today || 0)} total</p>
-        </div>
-
-        {/* Total Served Today */}
-        <div className="card animate-fade-in-up stagger-6" style={{ borderLeft: '4px solid #00c896' }}>
-          <div className="flex items-start justify-between mb-3">
-            <p className="text-[10px] font-bold uppercase tracking-widest text-on-surface-variant">Total Served Today</p>
-            <div className="w-7 h-7 rounded-lg flex items-center justify-center" style={{ background: 'rgba(0,200,150,0.08)' }}>
-              <svg className="w-4 h-4" fill="none" stroke="#00c896" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>
-            </div>
-          </div>
-          <p className="text-5xl font-extrabold text-on-surface">{totalServed}</p>
-          <p className="text-xs text-on-surface-variant mt-2">{currentInQueue} students currently in queue</p>
-        </div>
+        )}
       </div>
     </div>
   );
 }
 
-
 /* ─── Queue Row Component ──────────────────────────────────────── */
-function QueueRow({ user: u, ghostFlags, actionLoading, onCall, onAttended, onRemoved, style }) {
+function QueueRow({ user: u, ghostFlags, actionLoading, onCall, onAttended, onRemoved, onPreviewDocuments, style }) {
   const [elapsed, setElapsed] = useState(0);
   const [menuOpen, setMenuOpen] = useState(false);
   useEffect(() => {
@@ -1192,6 +1016,19 @@ function QueueRow({ user: u, ghostFlags, actionLoading, onCall, onAttended, onRe
           <span className="font-semibold text-on-surface">{u.name}</span>
           {u.priority && u.priority !== 'normal' && <span className={`priority-badge ${u.priority}`}>{u.priority}</span>}
           {isGhost && <span className="ghost-badge">⚠ Ghost Alert</span>}
+          {Array.isArray(u.submitted_documents) && u.submitted_documents.length > 0 && (
+            <button
+              onClick={() => onPreviewDocuments?.({
+                userName: u.name,
+                token: u.token,
+                documents: u.submitted_documents,
+                activeIndex: 0,
+              })}
+              className="text-[10px] font-bold uppercase tracking-wider px-2 py-1 rounded-full bg-primary/10 text-primary hover:bg-primary/15"
+            >
+              {u.submitted_documents.length} docs
+            </button>
+          )}
         </div>
         <p className="text-xs text-on-surface-variant font-mono mt-0.5">{u.token}</p>
       </div>
@@ -1216,21 +1053,164 @@ function QueueRow({ user: u, ghostFlags, actionLoading, onCall, onAttended, onRe
   );
 }
 
-/* ─── Service Timer ────────────────────────────────────────────── */
-function ServiceTimer({ user }) {
-  const [elapsed, setElapsed] = useState(0);
-  useEffect(() => {
-    const start = user.attended_at || user.called_at || user.join_time || Date.now();
-    const update = () => setElapsed(Math.round((Date.now() - start) / 1000));
-    update();
-    const iv = setInterval(update, 1000);
-    return () => clearInterval(iv);
-  }, [user]);
-  const m = Math.floor(elapsed / 60);
-  const s = elapsed % 60;
+/* ═══════════════════════════════════════════════════════════════════
+   SYSTEM CONTROL VIEW — Super Admin panel to manage queues & admins
+   ═══════════════════════════════════════════════════════════════════ */
+function SystemControlView({ idToken, onQueueCreated }) {
+  // Create Queue form
+  const [queueName, setQueueName] = useState('');
+  const [queueCounters, setQueueCounters] = useState(1);
+  const [queueCreating, setQueueCreating] = useState(false);
+  const [queueMsg, setQueueMsg] = useState(null);
+
+  // Register Admin form
+  const [adminUsername, setAdminUsername] = useState('');
+  const [adminPassword, setAdminPassword] = useState('');
+  const [adminDisplayName, setAdminDisplayName] = useState('');
+  const [adminCells, setAdminCells] = useState('');
+  const [adminCreating, setAdminCreating] = useState(false);
+  const [adminMsg, setAdminMsg] = useState(null);
+
+  const handleCreateQueue = async (e) => {
+    e.preventDefault();
+    setQueueCreating(true);
+    setQueueMsg(null);
+    try {
+      const queueId = queueName.trim().toLowerCase().replace(/\s+/g, '_');
+      await createQueue({
+        queue_id: queueId,
+        name: queueName.trim(),
+        type: queueId,
+        counters_open: queueCounters,
+      }, idToken);
+      setQueueMsg({ type: 'success', text: `✅ Queue "${queueName}" created successfully!` });
+      setQueueName('');
+      setQueueCounters(1);
+      if (onQueueCreated) onQueueCreated();
+    } catch (err) {
+      setQueueMsg({ type: 'error', text: err.message || 'Failed to create queue' });
+    } finally {
+      setQueueCreating(false);
+    }
+  };
+
+  const handleRegisterAdmin = async (e) => {
+    e.preventDefault();
+    setAdminCreating(true);
+    setAdminMsg(null);
+    try {
+      const cellsArray = adminCells.split(',').map(c => c.trim().toLowerCase().replace(/\s+/g, '_')).filter(Boolean);
+      await registerAdmin({
+        username: adminUsername.trim().toLowerCase(),
+        password: adminPassword,
+        displayName: adminDisplayName.trim(),
+        cells: cellsArray,
+        role: 'cell_admin',
+      }, idToken);
+      setAdminMsg({ type: 'success', text: `✅ Admin "${adminDisplayName}" registered!` });
+      setAdminUsername('');
+      setAdminPassword('');
+      setAdminDisplayName('');
+      setAdminCells('');
+    } catch (err) {
+      setAdminMsg({ type: 'error', text: err.message || 'Failed to register admin' });
+    } finally {
+      setAdminCreating(false);
+    }
+  };
+
   return (
-    <p className="text-white/70 text-sm">
-      {user.status === 'in_service' ? 'Service time' : 'Called'}: <span className="font-mono font-bold text-white">{String(m).padStart(2, '0')}:{String(s).padStart(2, '0')}</span>
-    </p>
+    <div className="p-6 space-y-6 animate-fade-in-up">
+      {/* Page Header */}
+      <div>
+        <h1 className="text-2xl font-extrabold text-on-surface">System Control</h1>
+        <p className="text-sm text-on-surface-variant mt-1">Manage queues, cells, and admin accounts. Super Admin only.</p>
+      </div>
+
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+        {/* ─── Create New Queue ──────────────────────────────── */}
+        <div className="card animate-fade-in-up stagger-1">
+          <h3 className="text-lg font-bold text-on-surface mb-1">Create New Queue Cell</h3>
+          <p className="text-xs text-on-surface-variant mb-5">Add a new department or service counter to the system.</p>
+
+          {queueMsg && (
+            <div className={`text-sm p-3 rounded-btn mb-4 ${queueMsg.type === 'success' ? 'bg-success/10 text-success' : 'bg-danger-light text-danger-dark'}`}>
+              {queueMsg.text}
+            </div>
+          )}
+
+          <form onSubmit={handleCreateQueue} className="space-y-3">
+            <div>
+              <label className="text-[10px] font-bold uppercase tracking-widest text-on-surface-variant mb-1 block">Queue Name</label>
+              <input type="text" value={queueName} onChange={e => setQueueName(e.target.value)} required
+                placeholder="e.g. Library Cell, Hostel Cell"
+                className="w-full px-4 py-3 rounded-btn bg-surface border border-gray-200 text-sm outline-none focus:border-primary focus:ring-2 focus:ring-primary/20 transition-all" />
+            </div>
+            <div>
+              <label className="text-[10px] font-bold uppercase tracking-widest text-on-surface-variant mb-1 block">Counters Open</label>
+              <input type="number" min="1" max="10" value={queueCounters} onChange={e => setQueueCounters(Number(e.target.value))}
+                className="w-full px-4 py-3 rounded-btn bg-surface border border-gray-200 text-sm outline-none focus:border-primary focus:ring-2 focus:ring-primary/20 transition-all" />
+            </div>
+            <button type="submit" disabled={queueCreating} className="btn-primary w-full">
+              {queueCreating ? 'Creating...' : '➕ Create Queue'}
+            </button>
+          </form>
+        </div>
+
+        {/* ─── Register New Admin ───────────────────────────── */}
+        <div className="card animate-fade-in-up stagger-2">
+          <h3 className="text-lg font-bold text-on-surface mb-1">Register New Admin</h3>
+          <p className="text-xs text-on-surface-variant mb-5">Create a new cell operator account with specific queue access.</p>
+
+          {adminMsg && (
+            <div className={`text-sm p-3 rounded-btn mb-4 ${adminMsg.type === 'success' ? 'bg-success/10 text-success' : 'bg-danger-light text-danger-dark'}`}>
+              {adminMsg.text}
+            </div>
+          )}
+
+          <form onSubmit={handleRegisterAdmin} className="space-y-3">
+            <div>
+              <label className="text-[10px] font-bold uppercase tracking-widest text-on-surface-variant mb-1 block">Display Name</label>
+              <input type="text" value={adminDisplayName} onChange={e => setAdminDisplayName(e.target.value)} required
+                placeholder="e.g. Library Operator"
+                className="w-full px-4 py-3 rounded-btn bg-surface border border-gray-200 text-sm outline-none focus:border-primary focus:ring-2 focus:ring-primary/20 transition-all" />
+            </div>
+            <div className="grid grid-cols-2 gap-3">
+              <div>
+                <label className="text-[10px] font-bold uppercase tracking-widest text-on-surface-variant mb-1 block">Username</label>
+                <input type="text" value={adminUsername} onChange={e => setAdminUsername(e.target.value)} required
+                  placeholder="library_admin"
+                  className="w-full px-4 py-3 rounded-btn bg-surface border border-gray-200 text-sm outline-none focus:border-primary focus:ring-2 focus:ring-primary/20 transition-all" />
+              </div>
+              <div>
+                <label className="text-[10px] font-bold uppercase tracking-widest text-on-surface-variant mb-1 block">Password</label>
+                <input type="text" value={adminPassword} onChange={e => setAdminPassword(e.target.value)} required
+                  placeholder="Library@123"
+                  className="w-full px-4 py-3 rounded-btn bg-surface border border-gray-200 text-sm outline-none focus:border-primary focus:ring-2 focus:ring-primary/20 transition-all" />
+              </div>
+            </div>
+            <div>
+              <label className="text-[10px] font-bold uppercase tracking-widest text-on-surface-variant mb-1 block">Assigned Cells (comma-separated IDs)</label>
+              <input type="text" value={adminCells} onChange={e => setAdminCells(e.target.value)} required
+                placeholder="e.g. library_cell, hostel_cell"
+                className="w-full px-4 py-3 rounded-btn bg-surface border border-gray-200 text-sm outline-none focus:border-primary focus:ring-2 focus:ring-primary/20 transition-all" />
+            </div>
+            <button type="submit" disabled={adminCreating} className="btn-primary w-full">
+              {adminCreating ? 'Registering...' : '👤 Register Admin'}
+            </button>
+          </form>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ─── Small shared UI pieces ─────────────────────────────────────────── */
+function MiniStat({ label, value }) {
+  return (
+    <div className="rounded-2xl bg-slate-50/80 p-3 text-center border border-slate-100">
+      <p className="text-[9px] uppercase tracking-[0.2em] text-slate-400 font-bold">{label}</p>
+      <p className="mt-1 text-lg font-black text-slate-800">{value}</p>
+    </div>
   );
 }

@@ -2,6 +2,41 @@
 // In production, set VITE_BACKEND_URL to the deployed backend URL
 const BACKEND = import.meta.env.PROD ? (import.meta.env.VITE_BACKEND_URL || '') : '';
 
+/* ─── Auth endpoints ──────────────────────────────────────────────── */
+
+export function loginAdmin(username, password) {
+  return apiFetch('/api/v1/auth/login', {
+    method: 'POST',
+    body: JSON.stringify({ username, password }),
+  });
+}
+
+export function getMe(token) {
+  return apiFetch('/api/v1/auth/me', {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+}
+
+export function registerAdmin(data, token) {
+  return apiFetch('/api/v1/auth/register', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}` },
+    body: JSON.stringify(data),
+  });
+}
+
+export function createQueue(data, token) {
+  return apiFetch('/api/v1/admin/queue/create', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}` },
+    body: JSON.stringify(data),
+  });
+}
+
+export function listQueues() {
+  return apiFetch('/api/v1/queue/list');
+}
+
 /**
  * Generic fetch wrapper with error handling.
  */
@@ -43,8 +78,17 @@ export function getUserPosition(queueId, userId) {
   return apiFetch(`/api/v1/queue/${queueId}/position/${userId}`);
 }
 
-export function getQueueUsers(queueId) {
-  return apiFetch(`/api/v1/queue/${queueId}/users`);
+export function getQueueUsers(queueId, token) {
+  return apiFetch(`/api/v1/queue/${queueId}/users`, {
+    headers: token ? adminHeaders(token) : {},
+  });
+}
+
+export function attachSubmittedDocuments(queueId, userId, documents) {
+  return apiFetch(`/api/v1/queue/${queueId}/documents/${userId}`, {
+    method: 'POST',
+    body: JSON.stringify({ documents }),
+  });
 }
 
 /* ─── Admin endpoints ─────────────────────────────────────────────── */
@@ -95,22 +139,13 @@ export function resumeQueue(queueId, token) {
   });
 }
 
-export function seedQueue(queueId, token) {
-  return apiFetch(`/api/v1/admin/queue/${queueId}/seed`, {
-    method: 'POST',
-    headers: adminHeaders(token),
-  });
-}
-
 export function callNextUser(queueId, token, counterId = 'counter_1') {
-  return apiFetch(`/api/v1/admin/queue/${queueId}/next`, {
+  return apiFetch(`/api/v1/admin/queue/${queueId}/call-next`, {
     method: 'POST',
     headers: adminHeaders(token),
     body: JSON.stringify({ counter_id: counterId, source: 'admin_manual' }),
   });
 }
-
-/* ─── Document Requirements endpoints ────────────────────────────── */
 
 export function getRequirements(queueId) {
   return apiFetch(`/api/v1/queue/${queueId}/requirements`);
@@ -126,18 +161,20 @@ export function saveRequirements(queueId, requirements, token) {
 
 /* ─── Analytics endpoint ─────────────────────────────────────────── */
 
-export function getAnalytics(queueId, token) {
-  return apiFetch(`/api/v1/admin/queue/${queueId}/analytics`, {
+export function getAnalytics(queueId, token, range = 'today') {
+  const rangeParam = range ? `?range=${range}` : '';
+  return apiFetch(`/api/v1/admin/queue/${queueId}/analytics${rangeParam}`, {
     headers: adminHeaders(token),
   });
 }
 
 /* ─── Counter management ─────────────────────────────────────────── */
 
-export function updateCounters(queueId, action, token) {
+export function updateCounters(queueId, payload, token) {
+  const body = typeof payload === 'string' ? { action: payload } : payload;
   return apiFetch(`/api/v1/admin/queue/${queueId}/counters`, {
     method: 'POST',
     headers: adminHeaders(token),
-    body: JSON.stringify({ action }),
+    body: JSON.stringify(body),
   });
 }

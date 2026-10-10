@@ -1,164 +1,67 @@
 /**
- * Ghost Buster — No-Show Detection Monitor
- * -------------------------------------------
- * Detects users likely to abandon the queue.
- * Auto-skips users with bail_probability > 85.
- * Sends flash alert at > 60.
+ * Ghost Buster — abandoned-student detection (advisory by default)
+ * -----------------------------------------------------------------
+ * Uses real socket presence (registry) plus last_seen instead of fragile
+ * client JS timers, so a backgrounded mobile tab is NOT removed.
  *
- * Formula:
- *   bail_probability = (inactivity_minutes × 3) + (gps_drift_km × 10)
- *                    + (history_noshows × 20) + (wait_exceeded_ratio × 15)
- *
- * AI Usage: NONE — Pure algorithmic scoring.
+ * Default behaviour: FLAG only (admin sees a warning).
+ * Auto-removal happens ONLY when the queue sets settings.auto_remove_ghosts.
  */
 
-const { db, firestore } = require('../firebase/init');
-const { recalcPositions } = require('../utils/queueHelpers');
+const { db } = require('../firebase/init');
+const { isUserConnected } = require('../socket/registry');
+const queueService = require('../services/queueService');
 
-/**
- * Run Ghost Buster scan on all waiting users in a queue.
- * @param {string} queueId
- * @param {object} io — Socket.io server instance
- * @returns {object} { scanned, flagged, removed, alerts[] }
- */
 async function runGhostBuster(queueId, io) {
   const result = { scanned: 0, flagged: 0, removed: 0, alerts: [] };
 
   try {
-    const usersRef = db.ref(`queues/${queueId}/users`);
-    const snapshot = await usersRef.get();
+    const state = await queueService.loadState(queueId);
+    if (!state.meta) return result;
+    if (state.meta.status === 'paused' || state.meta.status === 'closed') return result;
 
-    if (!snapshot.exists()) return result;
-
-    const users = snapshot.val();
+    const settings = queueService.getSettings(state.meta);
+    const grace = Math.max(5, settings.ghost_grace_minutes || 15);
     const now = Date.now();
 
-    for (const [userId, user] of Object.entries(users)) {
-      if (user.status !== 'waiting') continue;
+    for (const [userId, user] of Object.entries(state.users || {})) {
+      if (!user || user.status !== 'waiting') continue;
+      if (userId.startsWith('demo_')) continue;
+
       result.scanned++;
 
-      // ── Calculate bail probability ──────────────────────────────
-      const lastActive = user.last_active || user.join_time || now;
-      const inactivityMinutes = (now - lastActive) / (1000 * 60);
+      const connected = isUserConnected(userId);
+      const last = user.last_seen || user.last_active || user.join_time || now;
+      const awayMinutes = (now - last) / 60000;
+      const history = user.history_noshows || 0;
 
-      // GPS drift (if available)
-      const gpsDriftKm = 0; // Default: no GPS data available
+      let bail;
+      if (connected) {
+        bail = 0;
+      } else {
+        const ratio = awayMinutes / grace;
+        bail = Math.min(100, Math.round(ratio * 70) + history * 20);
+      }
 
-      // Historical no-shows (from user profile if available)
-      const historyNoshows = user.history_noshows || 0;
+      await db.ref(`queues/${queueId}/users/${userId}`).update({ bail_probability: bail });
 
-      // Wait exceeded ratio
-      const expectedWait = user.wait_predicted || 10;
-      const actualWait = (now - (user.join_time || now)) / (1000 * 60);
-      const waitExceededRatio = expectedWait > 0 ? actualWait / expectedWait : 0;
-
-      // ── Score formula ───────────────────────────────────────────
-      const bailProbability = Math.min(100, Math.round(
-        (inactivityMinutes * 3) +
-        (gpsDriftKm * 10) +
-        (historyNoshows * 20) +
-        (waitExceededRatio * 15)
-      ));
-
-      // Update user's bail_probability in DB
-      await db.ref(`queues/${queueId}/users/${userId}`).update({
-        bail_probability: bailProbability,
-      });
-
-      // ── Flash Alert: Score 60–85 ────────────────────────────────
-      if (bailProbability > 60 && bailProbability <= 85) {
+      // Advisory flag
+      if (bail > 60 && bail <= 85) {
         result.flagged++;
-
-        // Throttle: only send if last flash was > 2 min ago
         const lastFlash = user.last_flash_sent || 0;
         if (now - lastFlash > 2 * 60 * 1000) {
-          const alert = {
-            type: 'ghost_warning',
-            userId,
-            userName: user.name,
-            bail_probability: bailProbability,
-            flash_message: `We noticed you may have stepped away. Your spot is held for 2 more minutes.`,
-          };
-
-          result.alerts.push(alert);
-
-          // Emit flash message to that user's session
+          result.alerts.push({ type: 'ghost_warning', userId, userName: user.name, bail_probability: bail });
           if (io) {
-            io.to(`queue_${queueId}`).emit('flash_message', {
-              target_user: userId,
-              message: alert.flash_message,
-              type: 'warning',
-              duration: 8000,
-            });
-
-            // Notify admin
-            io.to(`admin_${queueId}`).emit('ghost_flag', {
-              userId,
-              userName: user.name,
-              bail_probability: bailProbability,
-            });
+            io.to(`admin_${queueId}`).emit('ghost_flag', { userId, userName: user.name, bail_probability: bail });
           }
-
-          await db.ref(`queues/${queueId}/users/${userId}`).update({
-            last_flash_sent: now,
-          });
+          await db.ref(`queues/${queueId}/users/${userId}`).update({ last_flash_sent: now });
         }
       }
 
-      // ── Auto-Remove: Score > 85 ─────────────────────────────────
-      if (bailProbability > 85) {
+      // Auto-removal (opt-in only)
+      if (settings.auto_remove_ghosts && bail > 85) {
+        await queueService.markNoShow(queueId, userId, 'ghost_buster_auto', io, 'ghost');
         result.removed++;
-
-        const alert = {
-          type: 'ghost_removed',
-          userId,
-          userName: user.name,
-          bail_probability: bailProbability,
-        };
-        result.alerts.push(alert);
-
-        // Remove user from queue
-        await db.ref(`queues/${queueId}/users/${userId}`).update({
-          status: 'removed',
-          removed_reason: 'ghost_buster_auto',
-          removed_at: now,
-        });
-
-        // Emit to all clients
-        if (io) {
-          io.to(`queue_${queueId}`).emit('queue_update', {
-            action: 'user_removed',
-            userId,
-            reason: 'no_show_detected',
-          });
-
-          io.to(`admin_${queueId}`).emit('ghost_flag', {
-            userId,
-            userName: user.name,
-            bail_probability: bailProbability,
-            action: 'auto_removed',
-          });
-        }
-
-        console.log(`👻 Ghost Buster: Removed ${user.name} (bail: ${bailProbability}%)`);
-
-        // Update user_history no-show count
-        try {
-          const crypto = require('crypto');
-          const phoneHash = crypto.createHash('sha256').update(user.phone).digest('hex');
-          const historyDoc = await firestore.collection('user_history').doc(phoneHash).get();
-          const existing = historyDoc.exists ? historyDoc.data() : {};
-          await firestore.collection('user_history').doc(phoneHash).set({
-            phone_hash: phoneHash,
-            no_show_count: (existing.no_show_count || 0) + 1,
-            last_visited: now,
-          }, { merge: true });
-        } catch (e) {
-          // Non-critical
-        }
-
-        // Recalculate positions for remaining users
-        await recalcPositions(queueId, io);
       }
     }
   } catch (err) {

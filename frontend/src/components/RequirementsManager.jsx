@@ -1,5 +1,6 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useMemo } from 'react';
 import { getRequirements, saveRequirements } from '../utils/api';
+import { getCommonDocumentsForQueue } from '../data/queueData';
 
 /**
  * RequirementsManager — admin component to add/edit/remove document requirements.
@@ -8,26 +9,59 @@ import { getRequirements, saveRequirements } from '../utils/api';
  */
 export default function RequirementsManager({ queueId, idToken, onClose }) {
   const [requirements, setRequirements] = useState([]);
+  const [source, setSource] = useState('saved');
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
   const [error, setError] = useState(null);
+
+  const commonRequirements = useMemo(
+    () => getCommonDocumentsForQueue(queueId).map((name) => ({ name, photo_url: null })),
+    [queueId]
+  );
+
+  const normalizeRequirements = useCallback((items) => {
+    if (!Array.isArray(items)) return [];
+    return items.map((item, index) => {
+      if (typeof item === 'string') {
+        return { name: item, photo_url: null };
+      }
+
+      return {
+        name: (item?.name || `Document ${index + 1}`).toString(),
+        photo_url: item?.photo_url || null,
+      };
+    });
+  }, []);
 
   // Fetch existing requirements
   useEffect(() => {
     if (!queueId) return;
     setLoading(true);
     getRequirements(queueId)
-      .then(data => setRequirements(data.requirements || []))
-      .catch(() => setRequirements([]))
+      .then(data => {
+        setRequirements(normalizeRequirements(data.requirements || []));
+        setSource(data.source || 'saved');
+      })
+      .catch(() => {
+        setRequirements(commonRequirements);
+        setSource('default');
+      })
       .finally(() => setLoading(false));
-  }, [queueId]);
+  }, [queueId, commonRequirements, normalizeRequirements]);
 
   // Add new empty requirement
   const handleAdd = useCallback(() => {
     setRequirements(prev => [...prev, { name: '', photo_url: null }]);
     setSaved(false);
   }, []);
+
+  const handleLoadCommon = useCallback(() => {
+    setRequirements(commonRequirements);
+    setSource('default');
+    setSaved(false);
+    setError(null);
+  }, [commonRequirements]);
 
   // Update requirement name
   const handleNameChange = useCallback((idx, value) => {
@@ -69,7 +103,7 @@ export default function RequirementsManager({ queueId, idToken, onClose }) {
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4" 
       style={{ background: 'rgba(0,0,0,0.7)', backdropFilter: 'blur(8px)' }}>
-      <div className="w-full max-w-lg rounded-3xl animate-scale-in overflow-hidden"
+      <div className="w-full max-w-lg rounded-3xl animate-fade-in-scale overflow-hidden"
         style={{
           background: 'linear-gradient(135deg, rgba(28,30,42,0.97), rgba(15,17,23,0.97))',
           border: '1px solid rgba(255,255,255,0.08)',
@@ -109,6 +143,19 @@ export default function RequirementsManager({ queueId, idToken, onClose }) {
             </div>
           ) : (
             <>
+              <div className="rounded-2xl p-4 mb-4" style={{ background: 'rgba(255,255,255,0.04)', border: '1px solid rgba(255,255,255,0.06)' }}>
+                <div className="flex items-start justify-between gap-3">
+                  <div>
+                    <p className="text-xs uppercase tracking-wider text-on-surface-dark-variant">Common queue template</p>
+                    <p className="text-sm text-white font-medium mt-1">{commonRequirements.length} common document{commonRequirements.length !== 1 ? 's' : ''} for this queue</p>
+                    <p className="text-xs text-on-surface-dark-variant mt-1">Use this as a starting point, then add or remove items for this cell.</p>
+                  </div>
+                  <button onClick={handleLoadCommon} className="text-xs font-semibold px-3 py-2 rounded-lg bg-primary/15 text-primary hover:bg-primary/25 transition-colors">
+                    Load Common Docs
+                  </button>
+                </div>
+              </div>
+
               {requirements.map((req, idx) => (
                 <div key={idx} className="flex items-center gap-3 p-3.5 rounded-xl transition-all duration-200 animate-fade-in-up group"
                   style={{ background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(255,255,255,0.06)' }}>
@@ -181,6 +228,7 @@ export default function RequirementsManager({ queueId, idToken, onClose }) {
         <div className="px-7 py-5 flex items-center justify-between gap-3"
           style={{ borderTop: '1px solid rgba(255,255,255,0.06)' }}>
           <p className="text-[10px] text-on-surface-dark-variant">
+            {source === 'default' ? 'Using default queue template · ' : ''}
             {requirements.filter(r => r.name.trim()).length} document{requirements.filter(r => r.name.trim()).length !== 1 ? 's' : ''}
           </p>
           <div className="flex items-center gap-3">

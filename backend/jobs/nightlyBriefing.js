@@ -12,6 +12,7 @@ const { db, firestore } = require('../firebase/init');
 const { callGemini } = require('../ai/gemini');
 const { briefingPrompt } = require('../ai/prompts');
 const { DEFAULT_SERVICE_TIMES } = require('../monitors/counterCompass');
+const { dateKey } = require('../utils/dates');
 const mockBriefing = require('../data/mock_briefing.json');
 
 /**
@@ -28,7 +29,7 @@ function initNightlyBriefing() {
       if (!queuesSnap.exists()) return;
 
       const queues = queuesSnap.val();
-      const yesterday = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+      const yesterday = dateKey(new Date(Date.now() - 24 * 60 * 60 * 1000));
 
       for (const queueId of Object.keys(queues)) {
         await generateBriefingForQueue(queueId, yesterday);
@@ -48,9 +49,9 @@ function initNightlyBriefing() {
  * @param {string} queueId
  * @param {string} dateKey — YYYY-MM-DD
  */
-async function generateBriefingForQueue(queueId, dateKey) {
+async function generateBriefingForQueue(queueId, dateKey, options = {}) {
   try {
-    // ── Gather yesterday's service_history ────────────────────────
+    // ── Gather the day's service_history ──────────────────────────
     let serviceHistory = [];
 
     try {
@@ -67,6 +68,12 @@ async function generateBriefingForQueue(queueId, dateKey) {
       // Use defaults if Firestore query fails
     }
 
+    // Without real data there is nothing meaningful to brief on — skip.
+    if (serviceHistory.length === 0) {
+      console.log(`🌙 Briefing skipped for ${queueId} on ${dateKey} — no service history.`);
+      return { generated: false, reason: 'no_data' };
+    }
+
     // ── Compute stats ────────────────────────────────────────────
     const totalServed = serviceHistory.filter((h) => h.attended_or_removed === 'attended').length;
     const noShowCount = serviceHistory.filter((h) => h.attended_or_removed === 'removed').length;
@@ -76,22 +83,23 @@ async function generateBriefingForQueue(queueId, dateKey) {
       .map((h) => h.wait_actual);
     const avgWaitActual = waitActuals.length > 0
       ? Math.round(waitActuals.reduce((a, b) => a + b, 0) / waitActuals.length)
-      : 10;
+      : 0;
 
     const waitPredictions = serviceHistory
       .filter((h) => h.wait_predicted)
       .map((h) => h.wait_predicted);
     const avgWaitPredicted = waitPredictions.length > 0
       ? Math.round(waitPredictions.reduce((a, b) => a + b, 0) / waitPredictions.length)
-      : 11;
+      : 0;
 
     const predictionErrors = serviceHistory
       .filter((h) => h.prediction_error !== undefined)
       .map((h) => h.prediction_error);
     const avgError = predictionErrors.length > 0
       ? predictionErrors.reduce((a, b) => a + b, 0) / predictionErrors.length
-      : 2;
-    const accuracyPercent = Math.min(100, Math.round(100 - (avgError / avgWaitActual) * 100));
+      : 0;
+    const accuracyPercent = Math.max(0, Math.min(100,
+      Math.round(100 - (avgError / Math.max(1, avgWaitActual)) * 100)));
 
     // Peak hour
     const hourCounts = {};
@@ -113,6 +121,7 @@ async function generateBriefingForQueue(queueId, dateKey) {
       .map(([intent]) => intent);
 
     // ── Update model_weights ─────────────────────────────────────
+    const updatedServiceTimes = { ...DEFAULT_SERVICE_TIMES };
     try {
       // Update service time averages per intent
       const serviceTimesByType = {};
@@ -125,7 +134,6 @@ async function generateBriefingForQueue(queueId, dateKey) {
         }
       });
 
-      const updatedServiceTimes = { ...DEFAULT_SERVICE_TIMES };
       for (const [intent, times] of Object.entries(serviceTimesByType)) {
         if (times.length > 0) {
           const avgToday = times.reduce((a, b) => a + b, 0) / times.length;
@@ -151,13 +159,13 @@ async function generateBriefingForQueue(queueId, dateKey) {
     const data = {
       queue_name: meta.name || queueId,
       date: dateKey,
-      total_served: totalServed || 47,
+      total_served: totalServed,
       avg_wait_actual: avgWaitActual,
       avg_wait_predicted: avgWaitPredicted,
-      accuracy_percent: accuracyPercent || 84,
+      accuracy_percent: accuracyPercent,
       peak_hour: parseInt(peakHour),
       no_show_count: noShowCount,
-      top_intents: topIntents.length > 0 ? topIntents : ['fee_payment', 'bonafide_cert'],
+      top_intents: topIntents,
       surge_count: 0,
       upcoming_calendar_events: [],
     };
@@ -170,7 +178,7 @@ async function generateBriefingForQueue(queueId, dateKey) {
       date: dateKey,
       accuracy_score: accuracyPercent,
       peak_hour: parseInt(peakHour),
-      avg_service_time_by_type: DEFAULT_SERVICE_TIMES,
+      avg_service_time_by_type: updatedServiceTimes,
       no_show_rate: totalServed > 0 ? noShowCount / (totalServed + noShowCount) : 0,
       removal_rate: totalServed > 0 ? noShowCount / (totalServed + noShowCount) : 0,
       fraud_attempts: 0,
@@ -180,8 +188,10 @@ async function generateBriefingForQueue(queueId, dateKey) {
     }, { merge: true });
 
     console.log(`🌙 Briefing generated for ${queueId} (accuracy: ${accuracyPercent}%)`);
+    return { generated: true };
   } catch (err) {
     console.error(`❌ Briefing generation error for ${queueId}:`, err.message);
+    return { generated: false, reason: 'error' };
   }
 }
 

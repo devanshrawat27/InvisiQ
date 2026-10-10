@@ -1,18 +1,24 @@
-const INTENTS = {
-  fee_payment: { label: 'Fee Payment', color: '#1a3c8f', bg: '#eef2ff' },
-  bonafide_cert: { label: 'Bonafide Cert', color: '#7c3aed', bg: '#f3e8ff' },
-  tc_mc_request: { label: 'TC Request', color: '#0891b2', bg: '#ecfeff' },
-  scholarship: { label: 'Scholarship', color: '#059669', bg: '#ecfdf5' },
-  admission: { label: 'Admission', color: '#d97706', bg: '#fffbeb' },
-  exam_query: { label: 'Exam Query', color: '#dc2626', bg: '#fef2f2' },
-  general: { label: 'General Query', color: '#64748b', bg: '#f8fafc' },
+const LABELS = {
+  fee_payment: 'Fee Payment',
+  bonafide_cert: 'Bonafide Cert',
+  tc_mc_request: 'TC Request',
+  scholarship: 'Scholarship',
+  admission: 'Admission',
+  exam_query: 'Exam Query',
+  general: 'General Query',
 };
 
+/**
+ * IntentBadge — a single calm style for every category (consistent theme).
+ */
 export default function IntentBadge({ category }) {
-  const intent = INTENTS[category] || INTENTS.general;
+  const label = LABELS[category] || LABELS.general;
   return (
-    <span className="intent-badge" style={{ background: intent.bg, color: intent.color, borderColor: intent.color + '20' }}>
-      {intent.label}
+    <span
+      className="intent-badge"
+      style={{ background: '#eef2ff', color: '#1a3c8f', borderColor: 'rgba(26,60,143,0.15)' }}
+    >
+      {label}
     </span>
   );
 }

@@ -4,7 +4,7 @@
   "description": "AI-powered virtual queue for college offices",
   "start_url": "/",
   "display": "standalone",
-  "theme_color": "#1a7db9",
+  "theme_color": "#1a3c8f",
   "background_color": "#f7f9fb",
   "icons": [
     {

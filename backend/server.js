@@ -13,6 +13,8 @@ const express = require('express');
 const http = require('http');
 const { Server } = require('socket.io');
 const cors = require('cors');
+const helmet = require('helmet');
+const compression = require('compression');
 
 // ─── Core Modules ────────────────────────────────────────────────────────────
 const { initSocketHandlers } = require('./socket/socketHandlers');
@@ -23,6 +25,7 @@ const { apiLimiter } = require('./middleware/rateLimit');
 // ─── Routes ──────────────────────────────────────────────────────────────────
 const queueRoutes = require('./routes/queue');
 const adminRoutes = require('./routes/admin');
+const { router: authRoutes, seedDefaultAdmins } = require('./routes/auth');
 
 // ─── App Setup ───────────────────────────────────────────────────────────────
 const app = express();
@@ -31,16 +34,38 @@ const server = http.createServer(app);
 const PORT = process.env.PORT || 5000;
 const CORS_ORIGIN = process.env.CORS_ORIGIN || 'http://localhost:5173';
 
+// ─── Behind a reverse proxy (Render/Vercel/etc.) ──────────────────────────────
+app.set('trust proxy', 1);
+
+// ─── Security Headers ─────────────────────────────────────────────────────────
+app.use(helmet({
+  crossOriginResourcePolicy: { policy: 'cross-origin' },
+  contentSecurityPolicy: false, // API only — no HTML is served
+}));
+
+// ─── Compression ──────────────────────────────────────────────────────────────
+app.use(compression());
+
 // ─── CORS Configuration ─────────────────────────────────────────────────────
+const allowedOrigins = CORS_ORIGIN.split(',').map(s => s.trim()).filter(Boolean);
+const isProd = process.env.NODE_ENV === 'production';
 app.use(cors({
-  origin: CORS_ORIGIN.split(',').map(s => s.trim()),
+  origin(origin, callback) {
+    // Allow same-origin/non-browser requests (no Origin header)
+    if (!origin || allowedOrigins.includes(origin)) return callback(null, true);
+    // In development, allow any localhost port (Vite may pick 5173/5174/…)
+    if (!isProd && /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(origin)) {
+      return callback(null, true);
+    }
+    return callback(new Error(`CORS: origin ${origin} not allowed`));
+  },
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
   credentials: true,
 }));
 
 // ─── Body Parsing ────────────────────────────────────────────────────────────
-app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
+app.use(express.json({ limit: '256kb' }));
+app.use(express.urlencoded({ extended: true, limit: '256kb' }));
 
 // ─── Rate Limiting (general) ────────────────────────────────────────────────
 app.use('/api/', apiLimiter);
@@ -48,7 +73,7 @@ app.use('/api/', apiLimiter);
 // ─── Socket.io Setup ────────────────────────────────────────────────────────
 const io = new Server(server, {
   cors: {
-    origin: CORS_ORIGIN.split(',').map(s => s.trim()),
+    origin: allowedOrigins,
     methods: ['GET', 'POST'],
     credentials: true,
   },
@@ -63,6 +88,7 @@ app.set('io', io);
 initSocketHandlers(io);
 
 // ─── API Routes ──────────────────────────────────────────────────────────────
+app.use('/api/v1/auth', authRoutes);
 app.use('/api/v1/queue', queueRoutes);
 app.use('/api/v1/admin', adminRoutes);
 
@@ -89,8 +115,8 @@ app.get('/', (req, res) => {
       queue_status: 'GET /api/v1/queue/:id/status',
       queue_join: 'POST /api/v1/queue/:id/join',
       queue_position: 'GET /api/v1/queue/:id/position/:userId',
-      queue_users: 'GET /api/v1/queue/:id/users',
-      queue_skip: 'POST /api/v1/queue/:id/skip/:userId',
+      queue_users: 'GET /api/v1/queue/:id/users (admin)',
+      queue_skip: 'POST /api/v1/queue/:id/skip/:userId (admin)',
       admin_attended: 'POST /api/v1/admin/queue/:id/attended/:userId',
       admin_removed: 'POST /api/v1/admin/queue/:id/removed/:userId',
       admin_done: 'POST /api/v1/admin/queue/:id/done/:userId',
@@ -98,11 +124,12 @@ app.get('/', (req, res) => {
       admin_briefing: 'GET /api/v1/admin/queue/:id/briefing',
       admin_briefing_trigger: 'POST /api/v1/admin/briefing/trigger',
       admin_create_queue: 'POST /api/v1/admin/queue/create',
-      admin_seed: 'POST /api/v1/admin/queue/:id/seed',
       admin_pause: 'POST /api/v1/admin/queue/:id/pause',
       admin_resume: 'POST /api/v1/admin/queue/:id/resume',
       queue_requirements: 'GET /api/v1/queue/:id/requirements',
       admin_requirements: 'POST /api/v1/admin/queue/:id/requirements',
+      admin_analytics: 'GET /api/v1/admin/queue/:id/analytics',
+      admin_counters: 'POST /api/v1/admin/queue/:id/counters',
     },
   });
 });
@@ -117,6 +144,9 @@ app.use((req, res) => {
 
 // ─── Error Handler ───────────────────────────────────────────────────────────
 app.use((err, req, res, next) => {
+  if (err && typeof err.message === 'string' && err.message.startsWith('CORS')) {
+    return res.status(403).json({ error: 'Forbidden', message: 'Origin not allowed' });
+  }
   console.error('❌ Unhandled error:', err);
   res.status(500).json({
     error: 'Internal Server Error',
@@ -140,6 +170,13 @@ server.listen(PORT, async () => {
   console.log('║               Counter Compass · Auto-Advance            ║');
   console.log('╚══════════════════════════════════════════════════════════╝');
   console.log('');
+
+  // Seed default admin accounts
+  try {
+    await seedDefaultAdmins();
+  } catch (err) {
+    console.error('⚠️  Admin seeding failed:', err.message);
+  }
 
   // Start background jobs
   try {

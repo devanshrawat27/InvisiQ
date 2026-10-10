@@ -25,7 +25,7 @@ async function scanForFraud(queueId, joinData, io) {
   const result = { fraud_flag: false, confidence: 0, reason: '', details: [] };
 
   try {
-    const { phone, join_timestamp, page_load_time, gps_lat, gps_lng, user_agent } = joinData;
+    const { phone, join_timestamp, page_load_time, form_fill_ms, gps_lat, gps_lng, user_agent } = joinData;
 
     // ── Check 1: Duplicate phone in active queue ─────────────────
     const usersRef = db.ref(`queues/${queueId}/users`);
@@ -60,26 +60,26 @@ async function scanForFraud(queueId, joinData, io) {
       }
     }
 
-    // ── Check 2: Bot-speed join (< 2s from page load) ───────────
-    if (join_timestamp && page_load_time) {
-      const timeDiff = join_timestamp - page_load_time;
-      if (timeDiff < 2000) {
-        result.fraud_flag = true;
-        result.confidence = 75;
-        result.reason = 'bot_pattern';
-        result.details.push(`Form submitted in ${timeDiff}ms — likely bot`);
+    // ── Check 2: Bot-speed join (advisory only — never blocks) ───
+    // A very fast fill is only a *signal*; browsers autofill and real users can
+    // submit quickly too, so we flag it for the admin but do NOT block the join.
+    const fillMs = Number.isFinite(Number(form_fill_ms))
+      ? Number(form_fill_ms)
+      : (Number(page_load_time) < 60000 ? Number(page_load_time) : null);
 
-        if (io) {
-          io.to(`admin_${queueId}`).emit('fraud_alert', {
-            type: 'bot_pattern',
-            time_to_fill: timeDiff,
-            confidence: 75,
-          });
-        }
+    if (fillMs !== null && fillMs < 2000) {
+      result.bot_suspected = true;
+      result.details.push(`Form submitted in ${fillMs}ms (fast)`);
 
-        console.log(`🚨 Fraud Scanner: Bot pattern detected — ${timeDiff}ms fill time`);
-        return result;
+      if (io) {
+        io.to(`admin_${queueId}`).emit('fraud_alert', {
+          type: 'bot_pattern',
+          time_to_fill: fillMs,
+          confidence: 40,
+          advisory: true,
+        });
       }
+      console.log(`ℹ️  Fraud Scanner: fast form fill (advisory) — ${fillMs}ms`);
     }
 
     // ── Check 3: Cross-queue duplicate (same phone in diff queue) ─

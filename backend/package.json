@@ -6,18 +6,23 @@
   "scripts": {
     "start": "node server.js",
     "dev": "node --watch server.js",
-    "test": "node test.js"
+    "test": "node test.js",
+    "test:unit": "node tests/monitors.test.js",
+    "test:audit": "node tests/audit.js"
   },
   "dependencies": {
-    "express": "^4.18.2",
-    "socket.io": "^4.7.2",
-    "firebase-admin": "^12.0.0",
+    "bcryptjs": "^3.0.3",
+    "compression": "^1.7.4",
     "cors": "^2.8.5",
     "dotenv": "^16.3.1",
+    "express": "^4.18.2",
     "express-rate-limit": "^7.1.4",
+    "firebase-admin": "^12.0.0",
+    "helmet": "^7.1.0",
+    "jsonwebtoken": "^9.0.2",
     "node-cron": "^3.0.3",
-    "twilio": "^4.19.0",
-    "crypto": "^1.0.1"
+    "socket.io": "^4.7.2",
+    "twilio": "^4.19.0"
   },
   "engines": {
     "node": ">=20.0.0"

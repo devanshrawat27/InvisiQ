@@ -1,322 +1,297 @@
-import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
+import { useState, useEffect, useCallback, useMemo } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
-import { useSocket } from '../hooks/useSocket';
-import { getUserPosition } from '../utils/api';
+import { useQueueState } from '../hooks/useQueueState';
 import { requestNotificationPermission, sendPushNotification } from '../hooks/usePushNotification';
-import { getDocumentsForIntent } from '../data/queueData';
+import { getDocumentsForIntent, getDocumentsForReason } from '../data/queueData';
+import YourTurnOverlay from '../components/YourTurnOverlay';
+import { speakApproaching, speakTurn } from '../utils/tts';
+import {
+  Sparkles, Clock, ShieldAlert, FileText, CheckCircle, AlertCircle, ArrowLeft,
+  Volume2, UserCheck, Info, Radio,
+} from 'lucide-react';
+
+// One calm theme for every department (single consistent look).
+const THEME = {
+  gradient: 'from-indigo-600 to-teal-600',
+  textColor: 'text-teal-700',
+  btn: 'bg-teal-600 hover:bg-teal-700 text-white',
+  soft: 'bg-teal-50 text-teal-700',
+};
+const themeFor = () => THEME;
 
 export default function WaitingRoom() {
   const { id: queueId } = useParams();
   const navigate = useNavigate();
+  const [session, setSession] = useState(null);
+  const [checkedDocs, setCheckedDocs] = useState({});
+  const [turnDismissed, setTurnDismissed] = useState(false);
 
-  const [myData, setMyData] = useState({
-    name: '', token: '', position: null, wait_minutes: null, lower_bound: null,
-    upper_bound: null, confidence: null, intent_category: '', counter_id: '',
-    status: 'waiting', userId: '', counter_label: '',
-  });
-  const [flashAlert, setFlashAlert] = useState(null);
-  const [isTurn, setIsTurn] = useState(false);
-  const [disconnected, setDisconnected] = useState(false);
-  const flashTimer = useRef(null);
-
-  // Init from session
   useEffect(() => {
     const stored = sessionStorage.getItem('myQueueData');
     if (!stored) { navigate(`/?q=${queueId}`); return; }
     try {
       const d = JSON.parse(stored);
-      setMyData({
-        name: d.name || '', token: d.token || '', position: d.position ?? null,
-        wait_minutes: d.wait_minutes ?? null, lower_bound: d.lower_bound ?? null,
-        upper_bound: d.upper_bound ?? null, confidence: d.confidence ?? null,
-        intent_category: d.intent_category || '', counter_id: d.counter_id || '',
-        counter_label: d.counter_label || '', status: 'waiting', userId: d.userId || '',
-      });
+      if (d.queue_id && d.queue_id !== queueId) { navigate(`/?q=${queueId}`); return; }
+      setSession(d);
     } catch { navigate(`/?q=${queueId}`); }
   }, [queueId, navigate]);
 
-  useEffect(() => { if (myData.userId) requestNotificationPermission(); }, [myData.userId]);
+  const userId = session?.userId || null;
+  const { status, me, phase, flash, connected, error, loading, refresh } = useQueueState(queueId, userId);
 
-  // Fetch position
-  const fetchPos = useCallback(async () => {
-    if (!queueId || !myData.userId) return;
-    try {
-      const d = await getUserPosition(queueId, myData.userId);
-      setMyData(prev => ({
-        ...prev,
-        position: d.position ?? prev.position,
-        status: d.status,
-        wait_minutes: d.wait_predicted ?? prev.wait_minutes,
-        lower_bound: d.wait_predicted != null ? Math.max(0, Math.round(d.wait_predicted * 0.8)) : prev.lower_bound,
-        upper_bound: d.wait_predicted != null ? Math.round(d.wait_predicted * 1.3) : prev.upper_bound,
-        confidence: d.wait_confidence ?? prev.confidence,
-        counter_id: d.counter_id || prev.counter_id,
-        intent_category: d.intent_category || prev.intent_category,
-      }));
-    } catch (err) {
-      if (err.status === 404) setMyData(p => ({ ...p, status: 'removed' }));
-    }
-  }, [queueId, myData.userId]);
+  useEffect(() => { if (userId) requestNotificationPermission(); }, [userId]);
 
+  // Notifications + voice on key transitions
   useEffect(() => {
-    if (!myData.userId || !queueId) return;
-    const iv = setInterval(fetchPos, 15000);
-    return () => clearInterval(iv);
-  }, [fetchPos, myData.userId, queueId]);
-
-  // Socket
-  const handleFlash = useCallback((data) => {
-    if (data.target_user && data.target_user !== 'all' && data.target_user !== myData.userId) return;
-    setFlashAlert({ message: data.message, type: data.type || 'info' });
-    if (flashTimer.current) clearTimeout(flashTimer.current);
-    flashTimer.current = setTimeout(() => setFlashAlert(null), data.duration || 5000);
-    if (data.type === 'urgent') sendPushNotification('⚡ Alert', data.message);
-  }, [myData.userId]);
-
-  const handleTurn = useCallback((data) => {
-    if (data.userId === myData.userId || data.token === myData.token) {
-      setIsTurn(true);
-      setMyData(p => ({ ...p, status: 'called', counter_id: data.counter || p.counter_id, counter_label: data.counter_label || p.counter_label }));
-      sendPushNotification('🔔 YOUR TURN!', `Token ${data.token} — proceed now`);
+    if (phase === 'called' && !turnDismissed) {
+      sendPushNotification('🔔 Your turn!', `Token ${me?.token || ''} — please proceed now`);
     }
-  }, [myData.userId, myData.token]);
+    if (phase === 'almost') {
+      sendPushNotification('📢 Almost your turn', 'Please head to the office now');
+    }
+  }, [phase, turnDismissed, me?.token]);
 
-  const socketHandlers = useMemo(() => ({
-    queue_update: () => fetchPos(),
-    flash_message: handleFlash,
-    turn_called: handleTurn,
-    surge_alert: () => setFlashAlert({ message: 'Queue is surging — wait may increase', type: 'warning' }),
-    turn_approaching: (d) => {
-      if (d.userId === myData.userId) {
-        setFlashAlert({ message: "You're almost next — head to the office!", type: 'warning' });
-        sendPushNotification('📢 Almost your turn!', "Head to the office now!");
-      }
-    },
-  }), [fetchPos, handleFlash, handleTurn, myData.userId]);
+  const theme = themeFor(queueId);
 
-  useSocket(queueId, myData.userId, socketHandlers);
+  const docs = useMemo(() => {
+    const fromServer = me?.required_documents || session?.required_documents;
+    if (Array.isArray(fromServer) && fromServer.length) return fromServer;
+    if (session?.visit_reason) {
+      const m = getDocumentsForReason(session.visit_reason);
+      if (m && m.documents.length) return m.documents;
+    }
+    return getDocumentsForIntent(me?.intent_category || session?.intent_category || 'general');
+  }, [me, session]);
 
-  // Document list
-  const docs = useMemo(() => getDocumentsForIntent(myData.intent_category), [myData.intent_category]);
+  const toggleDoc = (i) => setCheckedDocs((p) => ({ ...p, [i]: !p[i] }));
+  const totalDocs = docs.length;
+  const readyDocs = Object.values(checkedDocs).filter(Boolean).length;
+  const allReady = totalDocs > 0 && readyDocs === totalDocs;
 
-  // Progress ring
-  const maxPos = 20;
-  const progress = myData.position ? Math.max(0, 1 - (myData.position - 1) / maxPos) : 0;
-  const circumference = 2 * Math.PI * 90;
+  if (!session || loading) {
+    return <Centered><div className="w-10 h-10 border-4 border-indigo-600 border-t-transparent rounded-full animate-spin" /><p className="mt-4 text-slate-500 text-sm">Loading your queue…</p></Centered>;
+  }
 
-  // Confidence color
-  const confColor = myData.confidence >= 80 ? '#00c896' : myData.confidence >= 60 ? '#f59e0b' : '#e53935';
-
-  // YOUR TURN overlay
-  if (isTurn) return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-6" style={{ background: 'rgba(0,0,0,0.35)', backdropFilter: 'blur(8px)' }}>
-      {/* Pulsing rings */}
-      <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2">
-        <div className="w-80 h-80 rounded-full border-2 animate-ripple" style={{ borderColor: 'rgba(0,200,150,0.15)' }} />
-        <div className="w-80 h-80 rounded-full border-2 animate-ripple absolute inset-0" style={{ animationDelay: '0.5s', borderColor: 'rgba(0,200,150,0.15)' }} />
-        <div className="w-80 h-80 rounded-full border-2 animate-ripple absolute inset-0" style={{ animationDelay: '1s', borderColor: 'rgba(0,200,150,0.15)' }} />
+  if (error && !me) {
+    return <Centered>
+      <div className="bg-white rounded-3xl border border-slate-100 shadow-xl p-8 max-w-sm text-center">
+        <AlertCircle className="w-10 h-10 text-red-500 mx-auto mb-3" />
+        <h2 className="text-lg font-bold text-slate-800 mb-1">Couldn’t load your queue</h2>
+        <p className="text-sm text-slate-500 mb-6">{error}</p>
+        <button onClick={refresh} className={`w-full py-3 rounded-2xl font-bold text-sm ${theme.btn}`}>Retry</button>
       </div>
+    </Centered>;
+  }
 
-      <div className="relative w-full max-w-sm rounded-3xl p-8 text-center animate-scale-in"
-        style={{
-          background: '#ffffff',
-          boxShadow: '0 24px 64px rgba(0,0,0,0.18)',
-          border: '1px solid #e8ecf2',
-        }}>
-        <div className="relative inline-block mb-5">
-          <div className="absolute inset-0 rounded-full blur-xl animate-breathe" style={{ background: 'rgba(0,200,150,0.15)' }} />
-          <div className="text-6xl relative animate-bounce">🔔</div>
-        </div>
-
-        <h1 className="text-3xl font-extrabold mb-4" style={{ color: '#00c896' }}>YOUR TURN!</h1>
-
-        <div className="rounded-2xl py-4 px-5 mb-3" style={{ background: '#f4f6fa', border: '1px solid #e8ecf2' }}>
-          <p className="text-[10px] uppercase tracking-widest mb-1.5 font-semibold" style={{ color: '#94a3b8' }}>Token</p>
-          <p className="font-mono text-3xl font-bold" style={{ color: '#1a1a2e' }}>{myData.token}</p>
-        </div>
-
-        <div className="rounded-2xl py-4 px-5 mb-6" style={{ background: '#f4f6fa', border: '1px solid #e8ecf2' }}>
-          <p className="text-[10px] uppercase tracking-widest mb-1.5 font-semibold" style={{ color: '#94a3b8' }}>Proceed to</p>
-          <p className="text-xl font-bold" style={{ color: '#1a3c8f' }}>
-            {myData.counter_label || myData.counter_id?.replace('_', ' ').replace(/\b\w/g, l => l.toUpperCase()) || 'Counter'}
-          </p>
-        </div>
-
-        <button onClick={() => setIsTurn(false)} className="btn-accent w-full text-lg py-4 group">
-          <span>✓ OK, heading there now</span>
-          <span className="ml-2 inline-block transition-transform duration-300 group-hover:translate-x-1">→</span>
-        </button>
+  if (phase === 'removed') {
+    const reasonText = {
+      no_show: 'The counter marked you as not present when you were called.',
+      not_present: 'You were marked not present at the counter.',
+      auto_timeout: 'You didn’t reach the counter in time when called.',
+      ghost_buster_auto: 'We couldn’t reach your device, so your spot was released.',
+      orphaned_cleanup: 'Your spot was reset. Please join again.',
+      cancelled: 'You cancelled your spot.',
+    }[me?.removed_reason] || 'Your spot in this queue is no longer active.';
+    return <Centered>
+      <div className="bg-white rounded-3xl border border-slate-100 shadow-xl p-8 max-w-sm text-center">
+        <span className="text-5xl block mb-3">👋</span>
+        <h2 className="text-2xl font-bold text-slate-800 mb-2">You’ve left the queue</h2>
+        <p className="text-slate-500 text-sm mb-2">{reasonText}</p>
+        <p className="text-slate-400 text-xs mb-8">You can rejoin anytime.</p>
+        <button onClick={() => { sessionStorage.removeItem('myQueueData'); navigate(`/queue/${queueId}/join`); }} className={`w-full py-3.5 rounded-2xl font-bold text-sm ${theme.btn}`}>Rejoin queue</button>
       </div>
-    </div>
-  );
+    </Centered>;
+  }
 
-  // Removed state
-  if (myData.status === 'removed') return (
-    <div className="min-h-screen flex items-center justify-center p-6 bg-surface">
-      <div className="card text-center animate-fade-in-scale max-w-sm w-full">
-        <span className="text-6xl block mb-4">👋</span>
-        <h2 className="text-2xl font-bold text-on-surface mb-2">You've been removed from the queue</h2>
-        <p className="text-on-surface-variant mb-8">This may be because you were called and didn't respond.</p>
-        <button onClick={() => navigate(`/queue/${queueId}/join`)} className="btn-accent w-full">Rejoin Queue</button>
+  if (phase === 'served') {
+    return <Centered>
+      <div className="bg-white rounded-3xl border border-slate-100 shadow-xl p-8 max-w-md text-center">
+        <div className="mx-auto mb-4 w-20 h-20 rounded-full flex items-center justify-center bg-teal-50 text-teal-600"><CheckCircle className="w-10 h-10" /></div>
+        <p className="text-[10px] uppercase tracking-[0.35em] font-semibold mb-2 text-slate-400">Query completed</p>
+        <h2 className="text-2xl font-extrabold text-slate-800 mb-3">All done!</h2>
+        <p className="text-slate-500 text-sm mb-6">Token <span className="font-bold text-slate-700">{me?.token || session.token}</span> was handled successfully.</p>
+        <div className="flex flex-col gap-3">
+          <button onClick={() => { sessionStorage.removeItem('myQueueData'); navigate('/'); }} className={`w-full py-3.5 rounded-2xl font-bold text-sm ${theme.btn}`}>Back to home</button>
+          <button onClick={() => { sessionStorage.removeItem('myQueueData'); navigate(`/queue/${queueId}/join`); }} className="w-full rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm font-bold text-slate-600 hover:bg-slate-50">Join another request</button>
+        </div>
       </div>
-    </div>
-  );
+    </Centered>;
+  }
 
-  const waitDisplay = myData.wait_minutes;
-  const isNext = waitDisplay === 0;
+  if ((phase === 'called' || phase === 'in_service') && !turnDismissed) {
+    return <YourTurnOverlay
+      token={me?.token || session.token}
+      userName={me?.name || session.name}
+      counter={me?.counter_label || me?.counter_id || session.counter_label}
+      inService={phase === 'in_service'}
+      onDismiss={() => { setTurnDismissed(true); speakTurn(me?.token || session.token, me?.counter_label || 'counter'); }}
+    />;
+  }
+
+  const position = me?.position ?? session.position;
+  const ahead = me?.ahead ?? Math.max(0, (position || 1) - 1);
+  const wait = me?.wait_predicted ?? session.wait_minutes ?? 0;
+  const lower = Math.max(0, Math.round(wait * 0.8));
+  const upper = Math.round(wait * 1.3);
+  const confidence = me?.wait_confidence ?? session.confidence ?? 0;
+  const confColor = confidence >= 80 ? '#10b981' : confidence >= 60 ? '#f59e0b' : '#ef4444';
+  const counterLabel = me?.counter_label || (me?.counter_id ? me.counter_id.replace('_', ' ').replace(/\b\w/g, (l) => l.toUpperCase()) : session.counter_label) || 'Pending';
+
+  const phaseLabel = phase === 'next' ? "You're next — get ready!" : phase === 'almost' ? "You're almost next" : 'Please wait for your turn';
 
   return (
-    <div className="min-h-screen flex flex-col items-center justify-start p-6 pt-10 relative overflow-hidden bg-surface" id="waiting-room">
-      {/* Ambient blobs */}
+    <div className="min-h-screen relative overflow-hidden bg-[#F8FAFC]" id="waiting-room">
       <div className="absolute inset-0 pointer-events-none overflow-hidden">
-        <div className="absolute top-[5%] left-[10%] w-72 h-72 rounded-full bg-primary/5 blur-3xl animate-breathe" />
-        <div className="absolute bottom-[10%] right-[5%] w-96 h-96 rounded-full bg-accent/5 blur-3xl animate-breathe" style={{ animationDelay: '2s' }} />
+        <div className="absolute top-[6%] left-[8%] w-80 h-80 rounded-full bg-indigo-600/5 blur-3xl" />
+        <div className="absolute bottom-[8%] right-[6%] w-[28rem] h-[28rem] rounded-full bg-teal-500/5 blur-3xl" />
       </div>
 
-      {/* Connection indicator */}
-      {disconnected && (
-        <div className="fixed top-4 right-4 bg-danger text-white text-xs px-3 py-1.5 rounded-full font-medium animate-flash-in z-40">
-          Reconnecting...
+      {!connected && (
+        <div className="fixed top-4 right-4 bg-red-600 text-white text-xs px-3.5 py-2 rounded-full font-bold shadow-md z-40 flex items-center gap-1.5">
+          <AlertCircle className="w-3.5 h-3.5" /> <span>Reconnecting…</span>
         </div>
       )}
 
-      {/* Flash Message */}
-      {flashAlert && (
-        <div className={`fixed bottom-6 left-4 right-4 max-w-md mx-auto z-50 p-4 rounded-2xl shadow-lg animate-notification-in ${
-          flashAlert.type === 'urgent' ? 'bg-danger text-white' : flashAlert.type === 'warning' ? 'bg-warning text-white' : 'bg-white text-on-surface'
-        }`} style={{ border: flashAlert.type === 'info' ? '1px solid #e8ecf2' : 'none' }}>
-          <p className="text-sm font-medium">{flashAlert.message}</p>
+      {flash && (
+        <div className={`fixed bottom-6 left-4 right-4 max-w-md mx-auto z-50 p-4 rounded-2xl shadow-lg ${
+          flash.type === 'urgent' || flash.type === 'turn_called' ? 'bg-red-600 text-white'
+          : flash.type === 'warning' ? 'bg-amber-500 text-white' : 'bg-white text-slate-800 border border-slate-200'
+        }`}>
+          <p className="text-sm font-medium">{flash.message}</p>
         </div>
       )}
 
-      <div className="w-full max-w-sm relative z-10 space-y-6">
-        {/* Queue name + greeting */}
-        <div className="text-center animate-fade-in-up">
-          <p className="text-[10px] font-semibold uppercase tracking-widest mb-1" style={{ color: '#94a3b8' }}>{queueId.replace(/_/g, ' ').toUpperCase()}</p>
-          <p className="text-sm" style={{ color: '#64748b' }}>Hello, <span className="font-semibold" style={{ color: '#1a1a2e' }}>{myData.name}</span> 👋</p>
+      <div className="relative z-10 mx-auto max-w-5xl px-4 py-6 sm:px-6 lg:py-10">
+        <div className="mb-8 flex items-center justify-between gap-4">
+          <div className="flex items-center gap-3">
+            <button onClick={() => navigate('/')} className="w-10 h-10 rounded-xl bg-white hover:bg-slate-50 border border-slate-200/60 shadow-sm flex items-center justify-center text-slate-500" aria-label="Back">
+              <ArrowLeft className="w-4 h-4" />
+            </button>
+            <div>
+              <p className="text-[10px] font-extrabold uppercase tracking-[0.3em] text-slate-400">{queueId.replace(/_/g, ' ')}</p>
+              <p className="text-sm mt-0.5 text-slate-500">Hello, <span className="font-bold text-slate-800">{me?.name || session.name}</span> 👋</p>
+            </div>
+          </div>
+          <span className={`flex items-center gap-1.5 text-[10px] font-bold px-3 py-1.5 rounded-full border ${connected ? 'bg-teal-50 text-teal-600 border-teal-100' : 'bg-red-50 text-red-600 border-red-100'}`}>
+            <Radio className="w-3 h-3" /> {connected ? 'Live' : 'Offline'}
+          </span>
         </div>
 
-        {/* Token Display Card */}
-        <div className="card text-center animate-fade-in-up stagger-1 overflow-hidden relative" style={{ padding: '2rem 1.5rem' }}>
-          {/* Subtle gradient overlay */}
-          <div className="absolute inset-0 pointer-events-none" style={{
-            background: 'radial-gradient(circle at 50% 30%, rgba(26,60,143,0.03) 0%, transparent 70%)'
-          }} />
+        <div className="grid gap-6 lg:grid-cols-[1.2fr_1fr] lg:items-start">
+          <div className="space-y-6">
+            <div className="rounded-3xl bg-white p-8 shadow-[0_12px_40px_rgba(15,23,42,0.05)] border border-slate-100 relative overflow-hidden">
+              <div className={`absolute top-0 left-8 right-8 h-[3px] bg-gradient-to-r ${theme.gradient} rounded-b-full opacity-70`} />
+              <p className="text-[10px] uppercase tracking-[0.3em] font-extrabold text-slate-400 mt-1">{queueId.replace(/_/g, ' ')}</p>
+              <h2 className="mt-2 text-3xl font-black text-slate-800 tracking-tight">You’re in the queue</h2>
+              <p className={`mt-1 text-sm font-semibold ${theme.textColor}`}>{phaseLabel}</p>
 
-          <div className="relative flex justify-center mb-5">
-            <div className="relative w-48 h-48">
-              {/* Ring SVG */}
-              <svg className="w-full h-full -rotate-90" viewBox="0 0 200 200">
-                <circle cx="100" cy="100" r="90" fill="none" stroke="#e8ecf2" strokeWidth="4" />
-                <circle cx="100" cy="100" r="90" fill="none" stroke="url(#waitGradient)" strokeWidth="4" strokeLinecap="round"
-                  strokeDasharray={circumference} strokeDashoffset={circumference * (1 - progress)}
-                  className="transition-all duration-1000 ease-out" />
-                <defs>
-                  <linearGradient id="waitGradient" x1="0%" y1="0%" x2="100%" y2="0%">
-                    <stop offset="0%" stopColor="#1a3c8f" />
-                    <stop offset="100%" stopColor="#00c896" />
-                  </linearGradient>
-                </defs>
-              </svg>
-              {/* Token center */}
-              <div className="absolute inset-0 flex flex-col items-center justify-center">
-                <p className="font-mono text-4xl font-extrabold" style={{ color: '#1a3c8f' }}>
-                  {myData.token || '—'}
+              <div className="mt-8 rounded-3xl border border-slate-100 bg-gradient-to-b from-slate-50/60 to-white p-8 text-center">
+                <p className="text-xs uppercase tracking-[0.35em] text-slate-400 font-extrabold">Your token</p>
+                <p className={`mt-3 text-[4.5rem] font-black tracking-tighter bg-gradient-to-br ${theme.gradient} bg-clip-text text-transparent leading-none`}>
+                  {me?.token || session.token}
                 </p>
-                <p className="text-[10px] uppercase tracking-widest font-semibold mt-1" style={{ color: '#94a3b8' }}>Your Token</p>
+                <p className="mt-4 text-sm font-semibold text-slate-600">
+                  {ahead > 0 ? `${ahead} student${ahead === 1 ? '' : 's'} ahead of you` : 'You are next — proceed immediately!'}
+                </p>
+              </div>
+
+              <div className="mt-8 grid gap-4 sm:grid-cols-3">
+                <Stat icon={<UserCheck className="w-4 h-4" />} label="Your counter" value={counterLabel} sub="Proceed when called" soft={theme.soft} />
+                <Stat icon={<Clock className="w-4 h-4" />} label="Estimated wait" value={ahead === 0 ? 'Now' : `${lower}–${upper} min`} sub="Approximate" />
+                <Stat icon={<Sparkles className="w-4 h-4" />} label="AI confidence" value={`${confidence}%`} valueColor={confColor} sub={confidence >= 80 ? 'Accurate' : confidence >= 60 ? 'Fair' : 'Estimate'} soft="bg-teal-50 text-teal-600" />
               </div>
             </div>
+
+            <div className="rounded-3xl bg-white p-6 shadow-[0_12px_40px_rgba(15,23,42,0.04)] border border-slate-100">
+              <p className="text-[10px] uppercase tracking-[0.3em] font-extrabold text-slate-400 mb-5">Queue details</p>
+              <div className="grid grid-cols-3 gap-4">
+                <MiniStat label="Position" value={`#${position ?? '—'}`} />
+                <MiniStat label="Ahead" value={ahead} />
+                <MiniStat label="Status" value={(me?.status || 'waiting').replace('_', ' ')} />
+              </div>
+            </div>
+
+            {status && (
+              <div className="flex flex-wrap gap-3 text-xs text-slate-500">
+                <Pill>Waiting now: <b className="text-slate-700">{status.count}</b></Pill>
+                <Pill>Counters open: <b className="text-slate-700">{status.counters_open}</b></Pill>
+                <Pill>Avg wait: <b className="text-slate-700">{status.avg_wait}m</b></Pill>
+                {status.status !== 'open' && <Pill tone="amber">Queue is {status.status}</Pill>}
+              </div>
+            )}
           </div>
 
-          {/* Position */}
-          <p className="text-base" style={{ color: '#64748b' }}>
-            You are <span className="text-3xl font-extrabold" style={{ color: '#1a1a2e' }}>#{myData.position ?? '—'}</span> in queue
-          </p>
-        </div>
-
-        {/* Wait Time Card */}
-        <div className="animate-fade-in-up stagger-2">
-          {isNext ? (
-            <div className="card text-center" style={{ background: 'linear-gradient(135deg, #ecfdf5, #d1fae5)', border: '1px solid rgba(0,200,150,0.15)' }}>
-              <p className="text-2xl font-bold" style={{ color: '#00c896' }}>You're next! 🎉</p>
-              <p className="text-sm mt-1" style={{ color: '#64748b' }}>Get ready to be called</p>
-            </div>
-          ) : waitDisplay != null ? (
-            <div className="card text-center">
-              <p className="text-[10px] uppercase tracking-widest font-semibold mb-2" style={{ color: '#94a3b8' }}>Estimated Wait</p>
-              <div className="flex items-center justify-center gap-3">
-                {/* Mini confidence ring */}
-                {myData.confidence > 0 && (
-                  <div className="relative w-12 h-12 flex-shrink-0">
-                    <svg className="w-full h-full -rotate-90" viewBox="0 0 36 36">
-                      <circle cx="18" cy="18" r="14" fill="none" stroke="#e8ecf2" strokeWidth="2.5" />
-                      <circle cx="18" cy="18" r="14" fill="none" stroke={confColor} strokeWidth="2.5" strokeLinecap="round"
-                        strokeDasharray={`${myData.confidence * 0.88} 88`}
-                        className="transition-all duration-1000 ease-out" />
-                    </svg>
-                    <span className="absolute inset-0 flex items-center justify-center text-[9px] font-bold" style={{ color: confColor }}>
-                      {myData.confidence}%
-                    </span>
+          <div className="space-y-6">
+            <div className="rounded-3xl bg-white p-6 shadow-[0_12px_40px_rgba(15,23,42,0.04)] border border-slate-100">
+              <div className="flex items-center justify-between mb-4">
+                <div className="flex items-center gap-3">
+                  <div className={`w-10 h-10 rounded-2xl ${theme.soft} flex items-center justify-center`}><FileText className="w-5 h-5" /></div>
+                  <div>
+                    <h3 className="text-sm font-bold text-slate-800">Documents to carry</h3>
+                    <p className="text-[11px] text-slate-400 font-semibold uppercase">Based on your visit reason</p>
                   </div>
-                )}
-                <div>
-                  <p className="text-3xl font-extrabold" style={{ color: '#1a1a2e' }}>
-                    {myData.lower_bound ?? waitDisplay}–{myData.upper_bound ?? (waitDisplay + 5)}
-                    <span className="text-sm font-medium ml-1" style={{ color: '#94a3b8' }}>min</span>
-                  </p>
-                  {myData.confidence > 0 && (
-                    <p className="text-[10px] font-semibold mt-1" style={{ color: confColor }}>
-                      AI Confidence: {myData.confidence >= 80 ? 'High' : myData.confidence >= 60 ? 'Medium' : 'Low'}
-                    </p>
-                  )}
                 </div>
+                <span className={`text-xs font-bold ${allReady ? 'text-teal-600' : 'text-slate-500'}`}>{readyDocs}/{totalDocs}</span>
               </div>
+              <div className="w-full bg-slate-100 h-1.5 rounded-full mb-5 overflow-hidden">
+                <div className={`h-full bg-gradient-to-r ${theme.gradient} transition-all duration-500`} style={{ width: `${totalDocs ? (readyDocs / totalDocs) * 100 : 0}%` }} />
+              </div>
+              <div className="space-y-2">
+                {docs.map((doc, i) => {
+                  const name = typeof doc === 'string' ? doc : doc?.name || 'Document';
+                  const done = !!checkedDocs[i];
+                  return (
+                    <button key={i} onClick={() => toggleDoc(i)} className={`w-full flex items-center justify-between gap-3 rounded-2xl border p-3 text-left transition ${done ? 'border-teal-200 bg-teal-50/30' : 'border-slate-150 bg-slate-50/50 hover:bg-slate-50'}`}>
+                      <span className={`text-sm font-medium ${done ? 'line-through text-slate-400' : 'text-slate-700'}`}>{name}</span>
+                      {done ? <CheckCircle className="w-5 h-5 text-teal-500" /> : <span className="w-4 h-4 rounded border-2 border-slate-300" />}
+                    </button>
+                  );
+                })}
+              </div>
+              {allReady && <p className="mt-4 text-xs font-bold text-teal-600 flex items-center gap-1.5"><Sparkles className="w-3.5 h-3.5" /> All set — great!</p>}
             </div>
-          ) : (
-            <div className="card"><div className="skeleton h-16 w-48 mx-auto" /></div>
-          )}
-        </div>
 
-        {/* Counter assignment */}
-        {myData.counter_id && (
-          <div className="card text-center animate-fade-in-up stagger-3">
-            <p className="text-[10px] uppercase tracking-widest font-semibold mb-1" style={{ color: '#94a3b8' }}>When called, go to</p>
-            <p className="text-xl font-bold" style={{ color: '#1a3c8f' }}>{myData.counter_label || myData.counter_id?.replace('_', ' ').replace(/\b\w/g, l => l.toUpperCase())}</p>
-          </div>
-        )}
-
-        {/* Document Requirements */}
-        {docs && docs.length > 0 && (
-          <div className="card animate-fade-in-up stagger-4">
-            <div className="flex items-center gap-2.5 mb-4">
-              <div className="w-8 h-8 rounded-lg flex items-center justify-center" style={{ background: 'rgba(245, 158, 11, 0.1)' }}>
-                <span className="text-sm">📄</span>
+            <div className="rounded-3xl bg-white p-6 shadow-[0_12px_40px_rgba(15,23,42,0.04)] border border-slate-100">
+              <div className="flex items-center gap-2 text-sm text-slate-500">
+                <Info className="w-4 h-4" /> We’ll notify + play a sound when it’s your turn. Keep this tab open.
               </div>
-              <div>
-                <h3 className="text-sm font-bold text-on-surface">Please keep these documents ready</h3>
-                <p className="text-[10px] text-on-surface-variant">Based on your visit reason</p>
-              </div>
-            </div>
-            <div className="space-y-2">
-              {docs.map((doc, i) => (
-                <div key={i} className="flex items-center gap-3 p-3 rounded-xl" style={{ background: '#f4f6fa' }}>
-                  <div className="w-7 h-7 rounded-lg flex items-center justify-center flex-shrink-0" style={{ background: 'rgba(26,60,143,0.06)' }}>
-                    <svg className="w-3.5 h-3.5" style={{ color: 'rgba(26,60,143,0.4)' }} fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.5" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
-                    </svg>
-                  </div>
-                  <p className="text-sm font-medium" style={{ color: '#1a1a2e' }}>{doc}</p>
-                </div>
-              ))}
+              <button onClick={() => speakApproaching(me?.name || session.name, ahead || 1, counterLabel)} className="mt-4 w-full flex items-center justify-center gap-2 rounded-2xl border border-slate-200 bg-white px-4 py-3 text-xs font-bold text-slate-600 hover:bg-slate-50">
+                <Volume2 className="w-4 h-4" /> Test voice alert
+              </button>
             </div>
           </div>
-        )}
-
-        {/* Footer */}
-        <div className="text-center pb-6 animate-fade-in-up stagger-5">
-          <p className="text-[10px] uppercase tracking-widest font-medium" style={{ color: '#c4cbd8' }}>AI is monitoring your wait · Stay relaxed</p>
         </div>
+
+        <p className="text-center text-[10px] uppercase tracking-widest font-extrabold text-slate-300 pt-10">AI-assisted · Your position updates live</p>
       </div>
     </div>
   );
+}
+
+function Centered({ children }) {
+  return <div className="min-h-screen flex flex-col items-center justify-center p-6 bg-[#F8FAFC]">{children}</div>;
+}
+
+function Stat({ icon, label, value, sub, valueColor, soft = 'bg-indigo-50 text-indigo-600' }) {
+  return (
+    <div className="rounded-2xl border border-slate-100 bg-slate-50/40 p-4 text-center">
+      <div className={`w-8 h-8 rounded-xl ${soft} flex items-center justify-center mx-auto mb-2`}>{icon}</div>
+      <p className="text-[10px] uppercase tracking-[0.2em] text-slate-400 font-bold">{label}</p>
+      <p className="mt-1 text-xl font-black text-slate-800" style={valueColor ? { color: valueColor } : undefined}>{value}</p>
+      <p className="mt-0.5 text-xs text-slate-400">{sub}</p>
+    </div>
+  );
+}
+
+function MiniStat({ label, value }) {
+  return (
+    <div className="rounded-2xl bg-slate-50/80 p-4 text-center border border-slate-100">
+      <p className="text-[9px] uppercase tracking-[0.2em] text-slate-400 font-bold">{label}</p>
+      <p className="mt-1 text-xl font-black text-slate-800 capitalize">{value}</p>
+    </div>
+  );
+}
+
+function Pill({ children, tone }) {
+  return <span className={`px-3 py-1.5 rounded-full border ${tone === 'amber' ? 'bg-amber-50 text-amber-700 border-amber-100' : 'bg-white text-slate-500 border-slate-200'}`}>{children}</span>;
 }

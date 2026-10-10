@@ -40,7 +40,7 @@ export default function QRModal({ queueId, queueName, onClose }) {
       style={{ background: 'rgba(0, 0, 0, 0.35)', backdropFilter: 'blur(6px)' }}
       onClick={onClose}>
       <div
-        className="w-full max-w-md relative overflow-hidden rounded-3xl animate-scale-in p-8"
+        className="w-full max-w-md relative overflow-hidden rounded-3xl animate-fade-in-scale p-8"
         style={{
           background: '#ffffff',
           boxShadow: '0 24px 64px rgba(0,0,0,0.18)',
