@@ -32,7 +32,7 @@ const app = express();
 const server = http.createServer(app);
 
 const PORT = process.env.PORT || 5000;
-const CORS_ORIGIN = process.env.CORS_ORIGIN || 'http://localhost:5173';
+const CORS_ORIGIN = process.env.CORS_ORIGIN || 'http://localhost:5173,https://invisi-q.vercel.app';
 
 // ─── Behind a reverse proxy (Render/Vercel/etc.) ──────────────────────────────
 app.set('trust proxy', 1);

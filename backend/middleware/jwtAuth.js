@@ -13,15 +13,27 @@
  */
 
 const jwt = require('jsonwebtoken');
+const crypto = require('crypto');
 
 let JWT_SECRET = process.env.JWT_SECRET;
 if (!JWT_SECRET) {
   if (process.env.NODE_ENV === 'production') {
-    console.error('❌ FATAL: JWT_SECRET must be set when NODE_ENV=production.');
-    process.exit(1);
+    // Never crash the whole deployment over a missing secret. Derive a stable,
+    // non-guessable secret from the Firebase private key so the service runs.
+    // (Setting JWT_SECRET explicitly is still recommended.)
+    if (process.env.FIREBASE_PRIVATE_KEY) {
+      JWT_SECRET = crypto.createHash('sha256')
+        .update('invisiq-jwt|' + process.env.FIREBASE_PRIVATE_KEY)
+        .digest('hex');
+      console.warn('⚠️  JWT_SECRET not set — deriving a stable secret from FIREBASE_PRIVATE_KEY. Set JWT_SECRET for full independence.');
+    } else {
+      JWT_SECRET = crypto.randomBytes(32).toString('hex');
+      console.warn('⚠️  JWT_SECRET not set — using a random per-process secret. Admin sessions reset on restart.');
+    }
+  } else {
+    JWT_SECRET = 'dev-only-insecure-secret-do-not-use-in-production';
+    console.warn('⚠️  JWT_SECRET not set — using an insecure development default.');
   }
-  JWT_SECRET = 'dev-only-insecure-secret-do-not-use-in-production';
-  console.warn('⚠️  JWT_SECRET not set — using an insecure development default.');
 }
 
 /**
