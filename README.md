@@ -89,10 +89,6 @@ Deploy     →  Vercel (frontend) · Render (backend)
 | Exam Cell | `exam_admin` | `Exam@123` | Exam Cell only |
 | Admin Cell | `admin_cell` | `Admin@123` | Admin Cell only |
 
-**Admin workflow:** Call next → Mark arrived → Complete (or No-show) · Pause / Resume joins · Reports & AI briefing.
-
-> ⚠️ **These are the default seeded credentials and this repository is public.** Before a real / production deployment, change every password (or delete this section). Otherwise anyone who finds this repo can sign in as Super Admin.
-
 ---
 
 ## Local Setup
