@@ -78,12 +78,20 @@ Deploy     →  Vercel (frontend) · Render (backend)
 ## Admin Access
 
 1. Go to **[invisi-q.vercel.app/admin](https://invisi-q.vercel.app/admin)**
-2. Sign in with your admin credentials
-3. Select your cell — Fee or Admission
+2. Sign in with one of the seeded accounts below
+3. Select your cell (Fee, Admission, Exam, Admin…)
 
-**Controls available:** Call next · Mark attended · Pause queue · AI Nightly Briefing
+| Role | Username | Password | Access |
+|---|---|---|---|
+| Super Admin | `superadmin` | `Super@123` | All cells + Setup & Admins |
+| Fee Cell | `fee_admin` | `Fee@123` | Fee Cell only |
+| Admission Cell | `admission_admin` | `Admission@123` | Admission Cell only |
+| Exam Cell | `exam_admin` | `Exam@123` | Exam Cell only |
+| Admin Cell | `admin_cell` | `Admin@123` | Admin Cell only |
 
-> Admin credentials are distributed separately. Contact the project maintainer.
+**Admin workflow:** Call next → Mark arrived → Complete (or No-show) · Pause / Resume joins · Reports & AI briefing.
+
+> ⚠️ **These are the default seeded credentials and this repository is public.** Before a real / production deployment, change every password (or delete this section). Otherwise anyone who finds this repo can sign in as Super Admin.
 
 ---
 
